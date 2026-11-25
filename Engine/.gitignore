@@ -1,0 +1,60 @@
+# ==============================================================================
+# Multi-Agent Financial Research System - Engine (Backend) .gitignore
+# ==============================================================================
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+
+# Virtual Environments
+.venv/
+env/
+venv/
+ENV/
+
+# Environment Variables & Secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.secret
+
+# Local Relational Database & State
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+documents.db
+test_*.db
+
+# Vector Storage & Caches
+chroma_db/
+qdrant_storage/
+.cache/
+.pytest_cache/
+.coverage
+htmlcov/
+.ruff_cache/
+.mypy_cache/
+*.log
+
+# Dynamic Upload Storage
+uploads/*
+!uploads/.gitkeep
+
+# Explicitly Preserve Institutional Seed Documents
+!seed_documents/
+!seed_documents/*.pdf
+
+# IDE & OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

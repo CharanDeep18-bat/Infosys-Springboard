@@ -19,6 +19,8 @@ import { INITIAL_SESSIONS } from "./data/seedData";
 import { INITIAL_DOCUMENTS, getStoredDocuments } from "./data/documentData";
 import api from "./services/api";
 import "./index.css";
+import { useAuth } from "./context/AuthContext";
+import Login from "./pages/Login";
 
 function normalizePageName(page) {
   if (!page) return "Dashboard";
@@ -34,6 +36,7 @@ function normalizePageName(page) {
 }
 
 export default function App() {
+  const { user, loading } = useAuth();
   const [theme, setTheme] = useState(
     () => localStorage.getItem("finresearch_theme") || "dark"
   );
@@ -245,8 +248,15 @@ export default function App() {
   }
 
   useEffect(() => {
-    checkBackend();
-  }, []);
+  if (loading) return;
+
+  if (!user) {
+    setBackendStatus("checking");
+    return;
+  }
+
+  checkBackend();
+}, [loading, user?.id]);
 
   useEffect(() => {
     if (activeSession?.id) {
@@ -415,6 +425,27 @@ export default function App() {
     }
     setSessionSubView("directory");
     toast.success("Research session removed.");
+  }
+  if (loading) {
+    return (
+      <div
+        style={{
+          minHeight: "100vh",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          background: "#0f172a",
+          color: "#ffffff",
+          fontSize: "16px",
+        }}
+      >
+        Checking authentication...
+      </div>
+    );
+  }
+
+  if (!user) {
+    return <Login />;
   }
 
   return (

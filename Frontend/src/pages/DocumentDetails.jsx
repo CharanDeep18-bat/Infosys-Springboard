@@ -25,7 +25,7 @@ import Button from "../components/ui/Button";
 import Badge from "../components/ui/Badge";
 import DocumentViewer from "../components/DocumentViewer";
 import CitationModal from "../components/CitationModal";
-import { SAMPLE_CHUNKS, SEED_COMPANIES } from "../data/seedData";
+import {  SEED_COMPANIES } from "../data/seedData";
 import api from "../services/api";
 import toast from "react-hot-toast";
 
@@ -42,7 +42,92 @@ export default function DocumentDetails({
   const [searchChunkTerm, setSearchChunkTerm] = useState("");
   const [isRetrying, setIsRetrying] = useState(false);
   const [retryStage, setRetryStage] = useState(null);
+  const [liveChunks, setLiveChunks] = useState([]);
+  const [isLoadingChunks, setIsLoadingChunks] = useState(false);
+  const [chunkError, setChunkError] = useState(null);
+  const [backendStatus, setBackendStatus] = useState(null);
+  const [statusError, setStatusError] = useState(null);
 
+  useEffect(() => {
+    let active = true;
+
+    setLiveChunks([]);
+    setChunkError(null);
+
+    if (!doc?.id) {
+      setIsLoadingChunks(false);
+      return;
+    }
+
+    setIsLoadingChunks(true);
+
+    const timer = setTimeout(async () => {
+      try {
+        const res = await api.search({
+          query: searchChunkTerm.trim() || "financial information",
+          document_id: doc.id,
+          top_k: 20
+        });
+
+        if (active) {
+          setLiveChunks(res?.results || []);
+        }
+      } catch (err) {
+        if (active) {
+          setLiveChunks([]);
+          setChunkError("Unable to retrieve document chunks.");
+        }
+      } finally {
+        if (active) {
+          setIsLoadingChunks(false);
+        }
+      }
+    }, 350);
+
+    return () => {
+      active = false;
+      clearTimeout(timer);
+    };
+  }, [doc?.id, searchChunkTerm]);
+  
+
+  useEffect(() => {
+    let active = true;
+
+    setBackendStatus(null);
+    setStatusError(null);
+
+    if (!doc?.id) return;
+
+    async function loadStatus() {
+      try {
+        const result = await api.getDocumentStatus(doc.id);
+
+        if (active) {
+          setBackendStatus(result);
+          setStatusError(null);
+        }
+      } catch (err) {
+        if (active) {
+          setStatusError("Unable to retrieve processing status.");
+        }
+      }
+    }
+
+    loadStatus();
+
+    const interval = isRetrying
+      ? setInterval(loadStatus, 2000)
+      : null;
+
+    return () => {
+      active = false;
+
+      if (interval) {
+        clearInterval(interval);
+      }
+    };
+  }, [doc?.id, isRetrying]);
   if (!doc) {
     return (
       <div className="fin-doc-details-page p-8 text-center">
@@ -53,101 +138,153 @@ export default function DocumentDetails({
       </div>
     );
   }
+  function normalizeStage(status) {
+    const value = String(status || "").toUpperCase();
 
+    if (["COMPLETED", "SUCCESS", "INDEXED"].includes(value)) {
+      return "completed";
+    }
+
+    if (["FAILED", "ERROR"].includes(value)) {
+      return "error";
+    }
+
+    if (["PROCESSING", "RUNNING", "IN_PROGRESS"].includes(value)) {
+      return "in-progress";
+    }
+
+    return "waiting";
+  }
+
+  const stages = backendStatus?.stages || {};
+
+  const pipelineStages = [
+    {
+      name: "Uploaded",
+      status: backendStatus ? "completed" : "waiting",
+      detail: "Document registered in backend"
+    },
+    {
+      name: "Parsing & Chunking",
+      status: normalizeStage(stages.DOCUMENT_AGENT),
+      detail: `${backendStatus?.total_pages ?? 0} pages processed`
+    },
+    {
+      name: "Embedding & Indexing",
+      status: normalizeStage(
+        stages.DOCUMENT_AGENT ||
+        (backendStatus?.indexed ? "INDEXED" : null)
+      ),
+      detail: `${backendStatus?.chunk_count ?? 0} indexed chunks`
+    },
+    {
+      name: "Extraction Agent",
+      status: normalizeStage(stages.EXTRACTION_AGENT),
+      detail: "Financial metric extraction"
+    },
+    {
+      name: "Red Flag Agent",
+      status: normalizeStage(stages.RED_FLAG_AGENT),
+      detail: "Financial risk analysis"
+    }
+  ];
+
+  const completedStages = pipelineStages.filter(
+    stage => stage.status === "completed"
+  ).length;
   // Linked research session
   const linkedSession = sessions.find((s) => s.id === doc.sessionId) ||
     sessions.find((s) => s.companyIds?.includes(doc.ticker)) ||
     sessions[0];
 
   // Real document chunks from vector search
-  const [liveChunks, setLiveChunks] = useState([]);
-  const [isLoadingChunks, setIsLoadingChunks] = useState(false);
-
   useEffect(() => {
-    let isSubscribed = true;
-    setLiveChunks([]); // Immediately clear to prevent stale chunk leakage from previous document
-
-    async function fetchChunks() {
-      if (!doc?.id) return;
-      setIsLoadingChunks(true);
-      try {
-        const res = await api.search({
-          query: searchChunkTerm.trim() || "*",
-          document_id: doc.id,
-          top_k: 20
-        });
-        if (isSubscribed && res?.results) {
-          setLiveChunks(res.results);
-        }
-      } catch (e) {
-        // Fallback to sample chunks if vector store has no match
-      } finally {
-        if (isSubscribed) setIsLoadingChunks(false);
-      }
-    }
-    fetchChunks();
-    return () => { isSubscribed = false; };
+    setLiveChunks([]);
+    setIsLoadingChunks(false);
   }, [doc?.id, searchChunkTerm]);
+  // useEffect(() => {
+  //   let isSubscribed = true;
+  //   setLiveChunks([]); // Immediately clear to prevent stale chunk leakage from previous document
+
+  //   async function fetchChunks() {
+  //     if (!doc?.id) return;
+  //     setIsLoadingChunks(true);
+  //     try {
+  //       const res = await api.search({
+  //         query: searchChunkTerm.trim() || "*",
+  //         document_id: doc.id,
+  //         top_k: 20
+  //       });
+  //       if (isSubscribed && res?.results) {
+  //         setLiveChunks(res.results);
+  //       }
+  //     } catch (e) {
+  //       // Fallback to sample chunks if vector store has no match
+  //     } finally {
+  //       if (isSubscribed) setIsLoadingChunks(false);
+  //     }
+  //   }
+  //   fetchChunks();
+  //   return () => { isSubscribed = false; };
+  // }, [doc?.id, searchChunkTerm]);
 
   // Document chunks: live from vector store if available, fallback to seed
-  const fallbackChunks = SAMPLE_CHUNKS.filter(
-    (c) =>
-      c.companyId === doc.ticker ||
-      c.docName === doc.name
-  );
-  const docChunks = liveChunks.length > 0 ? liveChunks : fallbackChunks;
+  const docChunks = liveChunks;
 
-  const filteredChunks = docChunks.filter((c) => {
-    if (!searchChunkTerm.trim()) return true;
-    const term = searchChunkTerm.toLowerCase();
-    const text = c.textSnippet || c.text || c.content || "";
-    const section = c.section || "";
-    const id = c.id || c.chunkId || "";
-    return (
-      text.toLowerCase().includes(term) ||
-      section.toLowerCase().includes(term) ||
-      id.toLowerCase().includes(term)
-    );
-  });
+  const filteredChunks = docChunks.filter(
+    (chunk) => chunk.documentId === doc.id
+  );
 
   // Real Multi-Agent Pipeline Execution Workflow
+
   async function handleRetryProcessing() {
+    if (isRetrying) return;
+
     setIsRetrying(true);
-    setRetryStage("Executing Multi-Agent Workflow (Document -> Extraction -> Red Flag)...");
+    setRetryStage("Processing document...");
+    setStatusError(null);
 
     try {
       const result = await api.processDocument({
-        document_id: doc.id,
-        filename: doc.name,
-        workspace_id: doc.workspaceId || "default-workspace"
+        document_id: doc.id
       });
+
+      const status = await api.getDocumentStatus(doc.id);
+
+      setBackendStatus(status);
 
       const updated = {
         ...doc,
-        status: "Ready",
-        chunksCount: result.chunks || doc.chunksCount,
-        pages: result.pages || doc.pages,
-        pipelineStages: [
-          { name: "Uploaded", status: "completed", timestamp: new Date().toLocaleTimeString(), duration: "0.2s", detail: "PDF binary verified & deduplicated via SHA-256" },
-          { name: "Parsing & Chunking", status: "completed", timestamp: new Date().toLocaleTimeString(), duration: "1.5s", detail: `Indexed ${result.pages || doc.pages} pages into ${result.chunks || doc.chunksCount} semantic chunks` },
-          { name: "Embedding & Vector Store", status: "completed", timestamp: new Date().toLocaleTimeString(), duration: "1.2s", detail: "384-dim all-MiniLM-L6-v2 embeddings indexed" },
-          { name: "Extraction Agent", status: "completed", timestamp: new Date().toLocaleTimeString(), duration: "1.8s", detail: `Extracted ${result.metrics_extracted || 0} GAAP line items & calculated ratios` },
-          { name: "Red Flag Agent", status: "completed", timestamp: new Date().toLocaleTimeString(), duration: "1.4s", detail: `Identified ${result.red_flags || 0} risk anomalies & auditor caveats` }
-        ]
+        pages: status.total_pages ?? doc.pages,
+        chunksCount: status.chunk_count ?? doc.chunksCount,
+        status: result.status === "COMPLETED"
+          ? "Ready"
+          : "Error"
       };
 
       if (onUpdateDocument) {
         onUpdateDocument(doc.id, updated);
       }
-      toast.success("Document re-processed through Multi-Agent Pipeline successfully!");
+
+      if (result.status === "COMPLETED") {
+        toast.success("Multi-Agent Pipeline completed!");
+      } else {
+        toast.error("Document processing failed.");
+      }
+
     } catch (err) {
-      toast.error(`Processing failed: ${err.message}`);
+      if (err.status === 401) {
+        toast.error("Please sign in again.");
+      } else if (err.status === 404) {
+        toast.error("Document not found or access unavailable.");
+      } else {
+        toast.error(`Processing failed: ${err.message}`);
+      }
     } finally {
       setIsRetrying(false);
       setRetryStage(null);
     }
   }
-
   const isErrorState = doc.status === "Error";
 
   return (
@@ -256,7 +393,7 @@ export default function DocumentDetails({
             <AlertTriangle size={20} className="text-danger shrink-0 mt-0.5" />
             <div>
               <strong className="text-sm text-danger block">
-                OCR Parsing Error Detected on Page 42
+                Document Processing Failed
               </strong>
               <p className="text-xs text-muted mt-1 leading-relaxed">
                 Incomplete embedded font table encountered in Note 14 (Consolidated Liabilities footnote).
@@ -270,11 +407,10 @@ export default function DocumentDetails({
                   loading={isRetrying}
                   onClick={handleRetryProcessing}
                 >
-                  {isRetrying ? retryStage || "Recovering..." : "Execute Fallback OCR & Resume Ingestion"}
+                  {isRetrying
+    ? retryStage || "Retrying..."
+    : "Retry Document Processing"}
                 </Button>
-                <span className="text-[11px] text-muted">
-                  Fallback OCR bypasses malformed glyphs using rasterized neural vision.
-                </span>
               </div>
             </div>
           </div>
@@ -289,7 +425,7 @@ export default function DocumentDetails({
             {doc.pages} Pages
           </strong>
           <span className="text-[11px] text-accent flex-row items-center gap-1 mt-1">
-            <CheckCircle2 size={12} /> Full OCR Extraction
+            <CheckCircle2 size={12} /> Document Text Extraction
           </span>
         </div>
 
@@ -337,21 +473,18 @@ export default function DocumentDetails({
             </p>
           </div>
           <Badge variant="teal" size="xs">
-            {isRetrying ? "Pipeline Retrying" : isErrorState ? "Stage 2 Halted" : "5 / 5 Stages Completed"}
-          </Badge>
+{statusError
+  ? "Status unavailable"
+  : isRetrying
+    ? "Pipeline Processing"
+    : `${completedStages} / ${pipelineStages.length} Stages Completed`}          </Badge>
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-5 gap-3">
-          {(doc.pipelineStages || [
-            { name: "Uploaded", status: "completed", timestamp: "10:30 AM", duration: "0.8s", detail: "Binary PDF validated" },
-            { name: "Parsing", status: "completed", timestamp: "10:30 AM", duration: "3.2s", detail: "OCR & table grid extraction" },
-            { name: "Chunking", status: "completed", timestamp: "10:30 AM", duration: "2.5s", detail: "Semantic token segmenting" },
-            { name: "Indexing", status: "completed", timestamp: "10:30 AM", duration: "4.1s", detail: "1536-dim vector embedding" },
-            { name: "Ready", status: "completed", timestamp: "10:30 AM", duration: "0.3s", detail: "Verified for multi-agent reasoning" }
-          ]).map((stage, idx) => {
+          {pipelineStages.map((stage, idx) => {
             const isCompleted = stage.status === "completed";
             const isError = stage.status === "error";
-            const isInProgress = stage.status === "in-progress" || (isRetrying && idx === 1);
+            const isInProgress = stage.status === "in-progress";
             const isWaiting = stage.status === "waiting";
 
             return (
@@ -371,7 +504,7 @@ export default function DocumentDetails({
                   <span className="text-[11px] font-mono text-muted">STAGE 0{idx + 1}</span>
                   {isCompleted && (
                     <span className="text-success flex-row items-center gap-1 text-[11px] font-bold">
-                      <CheckCircle2 size={13} /> {stage.duration}
+                      <CheckCircle2 size={13} /> Completed
                     </span>
                   )}
                   {isError && (
@@ -398,7 +531,9 @@ export default function DocumentDetails({
 
                 <div className="mt-3 pt-2 border-t border-subtle flex-row justify-between text-[10px] text-dim">
                   <span>Timestamp:</span>
-                  <span className="font-mono text-muted">{stage.timestamp}</span>
+                  <span className="font-mono text-muted">
+  {stage.status}
+</span>
                 </div>
               </div>
             );
@@ -535,7 +670,15 @@ export default function DocumentDetails({
                     />
                   </div>
 
-                  {filteredChunks.length > 0 ? (
+                  {isLoadingChunks ? (
+                    <p className="text-muted">
+                      Retrieving document chunks...
+                    </p>
+                  ) : chunkError ? (
+                    <p className="text-red-400">
+                      {chunkError}
+                    </p>
+                  ) : filteredChunks.length > 0 ? (
                     filteredChunks.map((chunk) => (
                       <div key={chunk.id} className="p-3 border rounded-lg bg-card-subtle space-y-2">
                         <div className="flex-row justify-between items-center text-xs">
@@ -569,9 +712,9 @@ export default function DocumentDetails({
                       </div>
                     ))
                   ) : (
-                    <div className="text-center py-8 text-muted text-xs">
-                      No matching chunks found. Chunks are generated during the chunking stage.
-                    </div>
+                    <p className="text-muted">
+                      No indexed chunks available for this search.
+                    </p>
                   )}
                 </div>
               )}

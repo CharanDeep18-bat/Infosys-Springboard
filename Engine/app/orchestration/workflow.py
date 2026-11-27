@@ -34,109 +34,106 @@ def utc_now() -> str:
 # Node Implementations
 # ==============================================================================
 
-def document_agent_node(state: FinancialResearchState) -> FinancialResearchState:
-    """Step 1: Document Ingestion, Parsing, Table Extraction, Chunking, Embedding, Indexing."""
-    logger.info("Executing Document Agent node for doc: %s", state.document_id)
+def document_agent_node(
+    state: FinancialResearchState
+) -> FinancialResearchState:
+
     repo = get_database_repository()
-    doc_service = DocumentAgentService()
-
     start_time = utc_now()
-    try:
-        # If file bytes are provided directly:
-        if state.file_bytes:
-            upload_resp = doc_service.process_pdf_upload(
-                file_bytes=state.file_bytes,
-                filename=state.filename,
-                workspace_id=state.workspace_id,
-                session_id=state.session_id,
-                document_id=state.document_id,
-            )
-            state.document_id = upload_resp.document_id
-            state.total_pages = upload_resp.total_pages
-            state.total_characters = upload_resp.characters_extracted
-            state.chunk_count = upload_resp.chunk_count
-            state.is_indexed = upload_resp.indexed
-        elif state.storage_path and Path(state.storage_path).exists():
-            file_bytes = Path(state.storage_path).read_bytes()
-            upload_resp = doc_service.process_pdf_upload(
-                file_bytes=file_bytes,
-                filename=state.filename,
-                workspace_id=state.workspace_id,
-                session_id=state.session_id,
-                document_id=state.document_id,
-            )
-            state.document_id = upload_resp.document_id
-            state.total_pages = upload_resp.total_pages
-            state.total_characters = upload_resp.characters_extracted
-            state.chunk_count = upload_resp.chunk_count
-            state.is_indexed = upload_resp.indexed
-        else:
-            # Check if document already exists in DB and is indexed
-            existing = repo.get_document_by_id(state.document_id)
-            if existing and existing.get("indexed"):
-                state.total_pages = existing.get("total_pages", 0)
-                state.chunk_count = existing.get("chunk_count", 0)
-                state.is_indexed = True
-            else:
-                # Retrieve from storage abstraction (Supabase Storage or Local)
-                storage = get_file_storage()
-                obj_key = (existing.get("metadata") or {}).get("object_key") if existing else None
-                file_bytes = None
-                try:
-                    file_bytes = storage.get_file_bytes(state.document_id, object_key=obj_key)
-                except Exception as exc:
-                    logger.debug("Storage retrieval in workflow: %s", exc)
 
-                if file_bytes:
-                    upload_resp = doc_service.process_pdf_upload(
-                        file_bytes=file_bytes,
-                        filename=state.filename,
-                        workspace_id=state.workspace_id,
-                        session_id=state.session_id,
-                        document_id=state.document_id,
-                    )
-                    state.document_id = upload_resp.document_id
-                    state.total_pages = upload_resp.total_pages
-                    state.total_characters = upload_resp.characters_extracted
-                    state.chunk_count = upload_resp.chunk_count
-                    state.is_indexed = upload_resp.indexed
-                else:
-                    raise ValueError(
-                        f"Cannot process document '{state.document_id}': file not found in storage or on disk."
-                    )
+    try:
+
+        document = repo.get_user_document(
+            state.document_id,
+            state.user_id
+        )
+
+        if not document:
+            raise ValueError("Document not found.")
+
+        if document["workspace_id"] != state.workspace_id:
+            raise ValueError("Workspace mismatch.")
+
+        doc_service = DocumentAgentService()
+
+        result = doc_service.reindex_owned_document(
+            state.document_id,
+            user_id=state.user_id
+        )
+
+        state.total_pages = result["total_pages"]
+        state.total_characters = result["total_characters"]
+        state.chunk_count = result["chunk_count"]
+        state.is_indexed = result["indexed"]
 
         state.current_phase = "PARSED_AND_INDEXED"
+        repo.record_agent_run(
+            document_id=state.document_id,
+            session_id=state.session_id,
+            agent_name="DOCUMENT_AGENT",
+            status="COMPLETED"
+        )
+
         state.execution_steps.append(
             AgentExecutionLog(
                 step_name="document_agent_node",
                 agent="DOCUMENT_AGENT",
                 status="SUCCESS",
                 timestamp=start_time,
-                message=f"Indexed {state.total_pages} pages and {state.chunk_count} chunks.",
+                message=(
+                    f"Indexed {state.total_pages} pages "
+                    f"and {state.chunk_count} chunks."
+                )
             )
         )
-        if state.job_id:
-            repo.update_processing_job(state.job_id, status="PROCESSING", current_stage="DOCUMENT_AGENT_COMPLETED")
 
-    except Exception as e:
-        logger.exception("Error in document_agent_node: %s", e)
+        if state.job_id:
+            repo.update_processing_job(
+                state.job_id,
+                status="PROCESSING",
+                current_stage="DOCUMENT_AGENT_COMPLETED"
+            )
+
+    except Exception as exc:
+
+        try:
+            repo.record_agent_run(
+                document_id=state.document_id,
+                session_id=state.session_id,
+                agent_name="DOCUMENT_AGENT",
+                status="FAILED",
+                error_message="Document reindexing failed."
+            )
+        except Exception:
+            logger.exception(
+                "Could not record failed Document Agent run."
+            )
+
+        logger.exception("Document Agent failed.")
+
         state.is_failed = True
-        state.errors.append(f"Document Agent Error: {e}")
+        state.is_indexed = False
+        state.errors.append("Document reindexing failed.")
+
         state.execution_steps.append(
             AgentExecutionLog(
                 step_name="document_agent_node",
                 agent="DOCUMENT_AGENT",
                 status="FAILED",
                 timestamp=start_time,
-                message=str(e),
+                message="Document reindexing failed."
             )
         )
+
         if state.job_id:
-            repo.update_processing_job(state.job_id, status="FAILED", current_stage="DOCUMENT_AGENT", error_message=str(e))
+            repo.update_processing_job(
+                state.job_id,
+                status="FAILED",
+                current_stage="DOCUMENT_AGENT",
+                error_message="Document reindexing failed."
+            )
 
     return state
-
-
 def extraction_agent_node(state: FinancialResearchState) -> FinancialResearchState:
     """Step 2: Financial Metric Extraction & Python Decimal Ratio Computations."""
     if state.is_failed or not state.is_indexed:
@@ -151,6 +148,7 @@ def extraction_agent_node(state: FinancialResearchState) -> FinancialResearchSta
     try:
         financials: ExtractedFinancials = ext_service.extract_document_financials(
             document_id=state.document_id,
+            user_id=state.user_id,
             session_id=state.session_id,
         )
 
@@ -467,6 +465,7 @@ def red_flag_agent_node(state: FinancialResearchState) -> FinancialResearchState
             document_id=state.document_id,
             financials=financials,
             session_id=state.session_id,
+            user_id=state.user_id,
         )
 
         candidate_findings = [
@@ -661,7 +660,7 @@ class MultiAgentWorkflowOrchestrator:
         filename: str,
         file_bytes: Optional[bytes] = None,
         storage_path: Optional[str] = None,
-        workspace_id: Optional[str] = "default-workspace",
+        workspace_id: Optional[str] = None,
         session_id: Optional[str] = None,
         user_id: Optional[str] = None,
         job_id: Optional[str] = None,
@@ -669,30 +668,73 @@ class MultiAgentWorkflowOrchestrator:
         """Run Document Agent -> Extraction Agent -> Validation -> Red Flag Agent -> Persistence."""
         repo = get_database_repository()
 
-        # Ensure default-workspace exists if targeted, or validate existence
-        if workspace_id:
-            ws = repo.get_workspace(workspace_id)
-            if not ws:
-                if workspace_id == "default-workspace":
-                    repo.create_workspace(
-                        workspace_id="default-workspace",
-                        name="Default Workspace",
-                        description="System preloaded workspace",
-                    )
-                else:
-                    raise ValueError(f"Workspace '{workspace_id}' not found.")
+        # # Ensure default-workspace exists if targeted, or validate existence
+        if not user_id:
+            raise ValueError("Authenticated user ID is required.")
 
-        # Validate that research session exists and references workspace if provided
+        document = repo.get_user_document(
+            document_id=document_id,
+            user_id=user_id
+        )
+
+        if not document:
+            raise ValueError("Document not found.")
+
+        if workspace_id and workspace_id != document["workspace_id"]:
+            raise ValueError("Document not found in workspace.")
+
+        workspace_id = document["workspace_id"]
+
+        workspace = repo.get_user_workspace(
+            workspace_id=workspace_id,
+            user_id=user_id
+        )
+
+        if not workspace:
+            raise ValueError("Workspace not found.")
+
         if session_id:
-            session = repo.get_session(session_id)
-            if not session:
-                raise ValueError(f"Research session '{session_id}' not found.")
-            if workspace_id and session.get("workspace_id") != workspace_id:
-                raise ValueError(
-                    f"Research session '{session_id}' does not belong to workspace '{workspace_id}'."
-                )
+            session = repo.get_user_session(
+                session_id=session_id,
+                user_id=user_id
+            )
 
+            if not session:
+                raise ValueError("Research session not found.")
+
+            if session["workspace_id"] != workspace_id:
+                raise ValueError("Session workspace mismatch.")
+
+            if document_id not in (session.get("document_ids") or []):
+                raise ValueError("Document not found in session.")
+
+        filename = document["filename"]
+        storage_path = document.get("storage_path")
+
+        if file_bytes is not None:
+            raise ValueError(
+                "Direct file bytes are not accepted for existing documents."
+            )
+
+        if job_id:
+            existing_job = repo.get_processing_job(job_id)
+
+            if not existing_job:
+                raise ValueError("Processing job not found.")
+
+            if existing_job.get("document_id") != document_id:
+                raise ValueError("Processing job document mismatch.")
+
+            if existing_job.get("workspace_id") != workspace_id:
+                raise ValueError("Processing job workspace mismatch.")
+
+            if existing_job.get("session_id") != session_id:
+                raise ValueError("Processing job session mismatch.")
+
+        
         # Initialize or link tracking job
+
+    
         active_job_id = job_id
         if active_job_id:
             existing_job = repo.get_processing_job(active_job_id)

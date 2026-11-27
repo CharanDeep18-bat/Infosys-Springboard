@@ -20,8 +20,7 @@ from app.infrastructure.vector_store import get_vector_store
 router = APIRouter(tags=["Health"])
 
 
-@router.get("/health")
-def health_check():
+def _internal_health_check():
     """Comprehensive health check verifying DB, storage, vector store, embedding, and LLM readiness."""
     settings = get_settings()
     vector_store = get_vector_store()
@@ -104,3 +103,16 @@ def health_check():
             "poll_interval_seconds": settings.worker_poll_seconds,
         },
     }
+@router.get("/health")
+def health_check():
+    try:
+        result = _internal_health_check()
+
+        return {
+            "status": result["status"]
+        }
+
+    except Exception:
+        return {
+            "status": "degraded"
+        }

@@ -493,31 +493,16 @@ export function generateMockAgentResponse(query, selectedDocs = [], session = nu
 const CHAT_STORAGE_KEY_PREFIX = "finresearch_chat_history_v5_";
 
 export function getStoredChatHistory(sessionId = "default") {
-  try {
-    const raw = localStorage.getItem(`${CHAT_STORAGE_KEY_PREFIX}${sessionId}`);
-    if (raw !== null) {
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) return parsed;
-    }
-    return [];
-  } catch (err) {
-    console.warn("Error reading chat history from localStorage", err);
-    return [];
-  }
+  return [];
 }
 
-export function saveStoredChatHistory(sessionId = "default", messages = []) {
-  try {
-    localStorage.setItem(`${CHAT_STORAGE_KEY_PREFIX}${sessionId}`, JSON.stringify(messages));
-  } catch (err) {
-    console.warn("Error saving chat history to localStorage", err);
-  }
+export function saveStoredChatHistory(
+  sessionId = "default",
+  messages = []
+) {
 }
 
-export function clearStoredChatHistory(sessionId = "default") {
-  try {
-    localStorage.removeItem(`${CHAT_STORAGE_KEY_PREFIX}${sessionId}`);
-  } catch (err) {
-    console.warn("Error clearing chat history", err);
-  }
+export function clearStoredChatHistory(
+  sessionId = "default"
+) {
 }

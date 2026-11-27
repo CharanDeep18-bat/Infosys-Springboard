@@ -10,7 +10,29 @@ import { supabase } from "../lib/supabase";
 
 // Create authentication context
 const AuthContext = createContext(null);
+function clearLegacyPrivateStorage() {
+  const keys = [
+    "finresearch_reports_v6",
+    "finresearch_kb_records_v3",
+    "finresearch_orchestration_state_v4"
+  ];
 
+  try {
+    for (const key of keys) {
+      localStorage.removeItem(key);
+    }
+
+    for (let i = localStorage.length - 1; i >= 0; i--) {
+      const key = localStorage.key(i);
+
+      if (key?.startsWith("finresearch_chat_history_v5_")) {
+        localStorage.removeItem(key);
+      }
+    }
+  } catch (error) {
+    console.warn("Legacy cache cleanup failed");
+  }
+}
 // Provider component
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
@@ -18,6 +40,7 @@ export function AuthProvider({ children }) {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    clearLegacyPrivateStorage();
     // Listen for authentication changes
     const {
       data: { subscription },
@@ -61,6 +84,11 @@ export function AuthProvider({ children }) {
   // Sign out
   const signOut = async () => {
     const { error } = await supabase.auth.signOut();
+
+    if (!error) {
+      clearLegacyPrivateStorage();
+    }
+
     return { error };
   };
 

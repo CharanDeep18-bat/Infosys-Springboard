@@ -5,6 +5,7 @@
  */
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "/api";
+import { supabase } from "../lib/supabase";
 
 export class ApiError extends Error {
   constructor(message, status = 500, detail = null) {
@@ -36,6 +37,13 @@ export function formatFileSize(bytes) {
 }
 
 async function request(endpoint, options = {}) {
+  const { data, error } = await supabase.auth.getSession();
+
+if (error) {
+  throw new ApiError("Unable to retrieve session", 401);
+}
+
+const accessToken = data.session?.access_token;
   const url = `${API_BASE}${endpoint}`;
   const timeoutMs = options.timeout || (endpoint.includes("/upload") || endpoint.includes("/process") ? 60000 : 20000);
   const controller = new AbortController();
@@ -45,6 +53,9 @@ async function request(endpoint, options = {}) {
     Accept: "application/json",
     ...(options.headers || {})
   };
+  if (accessToken) {
+  headers["Authorization"] = `Bearer ${accessToken}`;
+}
 
   if (options.body && !(options.body instanceof FormData)) {
     headers["Content-Type"] = "application/json";
@@ -75,7 +86,9 @@ async function request(endpoint, options = {}) {
   } finally {
     clearTimeout(timeoutId);
   }
-
+  if (response.ok && options.responseType === "blob") {
+    return await response.blob();
+  }
   let responseData = null;
   const contentType = response.headers.get("content-type") || "";
   if (contentType.includes("application/json")) {
@@ -322,6 +335,25 @@ export const api = {
     return await request(`/sessions/${encodeURIComponent(sessionId)}`, { method: "GET" });
   },
 
+  async updateSession(sessionId, payload) {
+    return await request(
+      `/sessions/${encodeURIComponent(sessionId)}`,
+      {
+        method: "PATCH",
+        body: JSON.stringify(payload)
+      }
+    );
+  },
+
+  async deleteSession(sessionId) {
+    return await request(
+      `/sessions/${encodeURIComponent(sessionId)}`,
+      {
+        method: "DELETE"
+      }
+    );
+  },
+
   async listDocuments(workspaceId = null) {
     const query = workspaceId ? `?workspace_id=${encodeURIComponent(workspaceId)}` : "";
     const docs = await request(`/documents${query}`, { method: "GET" });
@@ -352,6 +384,28 @@ export const api = {
     return await request("/documents/seed", { method: "POST", timeout: 180000 });
   },
 
+  async getDocumentFile(documentId, signal) {
+    return await request(
+      `/documents/${encodeURIComponent(documentId)}/file`,
+      {
+        method: "GET",
+        responseType: "blob",
+        signal,
+        headers: {
+          Accept: "application/pdf"
+        }
+      }
+    );
+  },
+
+  async duplicateSession(sessionId) {
+    return await request(
+      `/sessions/${encodeURIComponent(sessionId)}/duplicate`,
+      {
+        method: "POST"
+      }
+    );
+  },
   async search({ query, top_k = 5, document_id = null, session_id = null, filter_tables_only = false }) {
     const payload = {
       query,
@@ -372,12 +426,18 @@ export const api = {
     };
   },
 
-  async processDocument({ document_id, filename, workspace_id, session_id }) {
-    return await request("/documents/process", {
-      method: "POST",
-      body: JSON.stringify({ document_id, filename, workspace_id, session_id }),
-      timeout: 180000
-    });
+  async processDocument({ document_id, session_id = null }) {
+      return await request(
+          `/documents/${encodeURIComponent(document_id)}/process`,
+          {
+              method: "POST",
+              body: JSON.stringify({
+                  document_id,
+                  session_id
+              }),
+              timeout: 180000
+          }
+      );
   },
 
   async getDocumentStatus(documentId) {
@@ -435,9 +495,18 @@ export const api = {
     return `${API_BASE}/documents/${encodeURIComponent(documentId)}/file`;
   },
 
+  async getDefaultWorkspace() {
+    return request("/workspaces/default", {
+      method: "POST"
+    });
+  },
+
   async deleteDocument(documentId) {
     return await request(`/documents/${encodeURIComponent(documentId)}`, { method: "DELETE" });
   }
 };
 
 export default api;
+export async function getAuthenticatedUser() {
+  return request("/auth/me");
+}

@@ -276,28 +276,36 @@ export const INITIAL_DOCUMENTS = [
 
 const STORAGE_KEY = "finresearch_documents_clean";
 
+// export function getStoredDocuments() {
+//   try {
+//     const raw = localStorage.getItem(STORAGE_KEY);
+//     if (raw !== null) {
+//       const parsed = JSON.parse(raw);
+//       if (Array.isArray(parsed)) {
+//         return parsed;
+//       }
+//     }
+//   } catch (e) {
+//     console.warn("Failed to load documents from localStorage:", e);
+//   }
+//   return [];
+// }
+
+// export function saveStoredDocuments(docs) {
+//   try {
+//     const toSave = Array.isArray(docs) ? docs : [];
+//     localStorage.setItem(STORAGE_KEY, JSON.stringify(toSave));
+//   } catch (e) {
+//     console.warn("Failed to save documents to localStorage:", e);
+//   }
+// }
+
 export function getStoredDocuments() {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw !== null) {
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) {
-        return parsed;
-      }
-    }
-  } catch (e) {
-    console.warn("Failed to load documents from localStorage:", e);
-  }
   return [];
 }
 
-export function saveStoredDocuments(docs) {
-  try {
-    const toSave = Array.isArray(docs) ? docs : [];
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(toSave));
-  } catch (e) {
-    console.warn("Failed to save documents to localStorage:", e);
-  }
+export function saveStoredDocuments(documents) {
+  // Private document caching is disabled.
 }
 
 export function formatFileSize(bytes) {

@@ -28,7 +28,7 @@ export default function ReportPreview({
   if (!report) return null;
 
   // Generate or get report structured content
-  const content = report.content || generateStructuredReportContent(report);
+  const content = report.content ;
   const { metadata, executiveSummary, keyFinancials, redFlags, companyComparison, outlook, citations } = content;
 
   const includedSections = report.sections || [
@@ -41,6 +41,14 @@ export default function ReportPreview({
 
   function handlePrint() {
     window.print();
+  }
+
+  if (!content) {
+    return (
+      <div className="p-6">
+        No verified report content is available.
+      </div>
+    );
   }
 
   return (

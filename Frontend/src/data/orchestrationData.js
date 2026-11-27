@@ -478,17 +478,6 @@ export const INITIAL_TIMELINE_EVENTS = [
 const ORCH_STORAGE_KEY = "finresearch_orchestration_state_v4";
 
 export function getStoredOrchestrationState() {
-  try {
-    const raw = localStorage.getItem(ORCH_STORAGE_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      if (parsed && Array.isArray(parsed.agents) && Array.isArray(parsed.timeline)) {
-        return parsed;
-      }
-    }
-  } catch (e) {
-    console.warn("Failed to load orchestration state from storage:", e);
-  }
   return {
     agents: AGENT_ROLES,
     workflows: WORKFLOW_PRESETS,
@@ -497,9 +486,4 @@ export function getStoredOrchestrationState() {
 }
 
 export function saveStoredOrchestrationState(state) {
-  try {
-    localStorage.setItem(ORCH_STORAGE_KEY, JSON.stringify(state));
-  } catch (e) {
-    console.warn("Failed to save orchestration state to storage:", e);
-  }
 }

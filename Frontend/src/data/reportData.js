@@ -131,27 +131,11 @@ export const INITIAL_REPORTS = [
 const REPORT_STORAGE_KEY = "finresearch_reports_v6";
 
 export function getStoredReports() {
-  try {
-    const raw = localStorage.getItem(REPORT_STORAGE_KEY);
-    if (raw !== null) {
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) return parsed;
-    }
-    return [];
-  } catch (err) {
-    console.warn("Failed to load reports from localStorage", err);
-    return [];
-  }
+  return [];
 }
 
 export function saveStoredReports(reports) {
-  try {
-    localStorage.setItem(REPORT_STORAGE_KEY, JSON.stringify(reports));
-  } catch (err) {
-    console.warn("Failed to save reports to localStorage", err);
-  }
 }
-
 // Generate structured report content for a given configuration
 export function generateStructuredReportContent(report) {
   const primaryKey = report.companyIds?.[0] || "INFY";

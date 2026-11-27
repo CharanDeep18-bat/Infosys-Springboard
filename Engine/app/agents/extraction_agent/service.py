@@ -11,7 +11,9 @@ from app.agents.extraction_agent.extractor import MetricExtractor
 from app.infrastructure.database import DatabaseRepositoryInterface, get_database_repository
 from app.infrastructure.vector_store import VectorStoreInterface, get_vector_store
 from app.schemas.agents import ExtractedFinancials, ExtractedMetric
-
+from app.infrastructure.vector_store.ownership import (
+    get_owned_document_chunks
+)
 logger = logging.getLogger(__name__)
 
 
@@ -33,8 +35,19 @@ class ExtractionAgentService:
         document_id: str,
         session_id: Optional[str] = None,
         chunks: Optional[List[Dict[str, Any]]] = None,
+        *,
+        user_id: str,
     ) -> ExtractedFinancials:
+
+        
         """Execute full financial extraction pipeline for a document."""
+
+        document = self.repo.get_user_document(
+            document_id, user_id
+        )
+
+        if not document:
+            raise ValueError("Document not found.")
         logger.info("Starting financial extraction for document: %s", document_id)
         doc = self.repo.get_document_by_id(document_id)
         if not doc:
@@ -46,30 +59,13 @@ class ExtractionAgentService:
         # 1. Gather document chunks (from argument or vector store retrieval)
         doc_chunks = chunks
         if not doc_chunks:
-            if hasattr(self.vector_store, "get_chunks_by_document"):
-                doc_chunks = self.vector_store.get_chunks_by_document(document_id)
-            if not doc_chunks:
-                # Fallback to similarity search matching document_id with matching vector dimension
-                dim = getattr(self.vector_store, "vector_size", 1536)
-                try:
-                    query_results = self.vector_store.search_chunks(
-                        query_embedding=[0.0] * dim,
-                        top_k=50,
-                        filters={"document_id": document_id},
-                    )
-                    doc_chunks = [
-                        {
-                            "text": r["text"],
-                            "page_number": r.get("metadata", {}).get("page_number", 1),
-                            "is_table": r.get("metadata", {}).get("is_table", False),
-                            "section": r.get("metadata", {}).get("section", ""),
-                        }
-                        for r in query_results
-                    ]
-                except Exception as search_err:
-                    logger.warning("Could not retrieve chunks via vector search fallback for doc %s: %s", document_id, search_err)
-                    doc_chunks = []
-
+            doc_chunks = get_owned_document_chunks(
+                repository=self.repo,
+                vector_store=self.vector_store,
+                document_id=document_id,
+                user_id=user_id
+            )
+            
         # 2. Execute extraction
         financials = self.extractor.extract_from_chunks(
             document_id=document_id,

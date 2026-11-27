@@ -64,12 +64,9 @@ export default function DocumentLibrary({
   initialSubView = "library"
 }) {
   const [subView, setSubView] = useState(initialSubView); // "library" | "upload" | "details"
-  const [documents, setDocuments] = useState(() => {
-    if (Array.isArray(initialDocumentsProp)) {
-      return initialDocumentsProp;
-    }
-    return getStoredDocuments();
-  });
+  const [documents, setDocuments] = useState(
+    initialDocumentsProp || []
+  );
   const [selectedDocId, setSelectedDocId] = useState(null);
 
   // Filters & Search State
@@ -79,7 +76,7 @@ export default function DocumentLibrary({
   const [companyFilter, setCompanyFilter] = useState("all");
   const [dateFilter, setDateFilter] = useState("all");
   const [viewMode, setViewMode] = useState("table"); // "table" | "grid"
-
+  const [isDeleting, setIsDeleting] = useState(false);
   // Quick Modal Previews & Deletions
   const [quickPreviewDoc, setQuickPreviewDoc] = useState(null);
   const [docToDelete, setDocToDelete] = useState(null);
@@ -105,12 +102,7 @@ export default function DocumentLibrary({
   }
 
   // Sync state to parent and localStorage whenever documents change
-  useEffect(() => {
-    saveStoredDocuments(documents);
-    if (onUpdateDocuments) {
-      onUpdateDocuments(documents);
-    }
-  }, [documents]);
+  
 
   // Sync from props if parent documents update
   useEffect(() => {
@@ -191,14 +183,17 @@ export default function DocumentLibrary({
   const seedCount = documents.filter((d) => d.isSeed).length;
 
   // Document Handlers
-  function handleDocumentUploaded(newDoc) {
-    const updated = [newDoc, ...documents.filter((d) => d.id !== newDoc.id && d.name !== newDoc.name)];
-    setDocuments(updated);
-    saveStoredDocuments(updated);
-    if (onUpdateDocuments) {
-      onUpdateDocuments(updated);
+  async function handleDocumentUploaded(newDoc) {
+    try {
+      const updated = await api.listDocuments();
+
+      setDocuments(updated);
+      onUpdateDocuments?.(updated);
+      setSelectedDocId(newDoc.id);
+
+    } catch (err) {
+      toast.error("Unable to refresh document library");
     }
-    setSelectedDocId(newDoc.id);
   }
 
   function handleUpdateDocument(id, updatedFields) {
@@ -206,13 +201,42 @@ export default function DocumentLibrary({
     setDocuments(updated);
   }
 
-  function handleDeleteDocument(id) {
-    const updated = documents.filter((d) => d.id !== id);
-    setDocuments(updated);
-    setDocToDelete(null);
-    if (selectedDocId === id) {
-      setSelectedDocId(updated.length > 0 ? updated[0].id : null);
-      setSubView("library");
+  async function handleDeleteDocument(id) {
+    if (isDeleting) return;
+
+    setIsDeleting(true);
+
+    try {
+      await api.deleteDocument(id);
+
+      const updated = documents.filter(
+        d => d.id !== id
+      );
+
+      setDocuments(updated);
+      setDocToDelete(null);
+
+      if (selectedDocId === id) {
+        setSelectedDocId(updated[0]?.id || null);
+        setSubView("library");
+      }
+
+      setQuickPreviewDoc(null);
+
+      toast.success("Document deleted successfully.");
+
+      try {
+        await onUpdateDocuments?.();
+      } catch {
+        toast.error("Document deleted, but refresh failed.");
+      }
+
+    } catch (err) {
+      toast.error(
+        `Deletion failed: ${err.message}`
+      );
+    } finally {
+      setIsDeleting(false);
     }
   }
 
@@ -808,8 +832,9 @@ export default function DocumentLibrary({
               size="sm"
               icon={Trash2}
               onClick={() => docToDelete && handleDeleteDocument(docToDelete.id)}
+              disabled={isDeleting}
             >
-              Confirm Delete
+              {isDeleting ? "Deleting..." : "Confirm Delete"}
             </Button>
           </div>
         }

@@ -66,8 +66,38 @@ class DocumentAgentService:
         workspace_id: Optional[str] = None,
         session_id: Optional[str] = None,
         document_id: Optional[str] = None,
+        *,
+        user_id: str,
     ) -> DocumentUploadResponse:
         """Validate, deduplicate, parse, chunk, embed, and index an uploaded PDF."""
+        if not user_id:
+            raise ValueError("Document owner is required")
+
+        if document_id is not None:
+            raise ValueError("Custom document IDs are not allowed")
+
+        if not workspace_id:
+            workspace = self.repo.get_or_create_default_workspace(
+                user_id=user_id
+            )
+            workspace_id = workspace["workspace_id"]
+
+        workspace = self.repo.get_user_workspace(
+            workspace_id=workspace_id,
+            user_id=user_id
+        )
+
+        if not workspace:
+            raise ValueError("Workspace not found")
+
+        if session_id:
+            session = self.repo.get_user_session(
+                session_id=session_id,
+                user_id=user_id
+            )
+
+            if not session or session["workspace_id"] != workspace_id:
+                raise ValueError("Session not found")
         # 1. Validation
         if not filename or not filename.lower().endswith(".pdf"):
             raise ValueError("Only PDF files are supported.")
@@ -79,14 +109,27 @@ class DocumentAgentService:
             max_mb = self.settings.max_file_size // (1024 * 1024)
             raise ValueError(f"File exceeds the {max_mb} MB limit.")
 
-        # 2. SHA-256 Duplicate Check
+        # 2. User-specific SHA-256 Duplicate Check
         file_hash = hashlib.sha256(file_bytes).hexdigest()
-        existing_doc = self.repo.get_document_by_sha256(file_hash)
+
+        existing_doc = self.repo.get_user_document_by_sha256(
+            sha256_hash=file_hash,
+            user_id=user_id
+        )
+
+        if existing_doc and existing_doc["workspace_id"] != workspace_id:
+            raise ValueError(
+                "This document already exists in another workspace"
+            )
 
         if not document_id and existing_doc and existing_doc.get("indexed") == 1:
             doc_id = existing_doc["document_id"]
             # Ensure the vector store actually contains indexed chunks for this document
-            existing_chunks = self.vector_store.get_chunks_by_document(doc_id)
+            existing_chunks = self.vector_store.get_chunks_by_document(
+                doc_id,
+                user_id=user_id,
+                workspace_id=workspace_id
+            )       
             if existing_chunks:
                 if session_id:
                     self.repo.add_document_to_session(session_id, doc_id)
@@ -107,7 +150,11 @@ class DocumentAgentService:
                 )
 
         # 3. Document ID and File Storage
-        document_id = document_id or (existing_doc["document_id"] if existing_doc else uuid4().hex)
+        document_id = (
+            existing_doc["document_id"]
+            if existing_doc
+            else uuid4().hex
+        )   
         stored_path = self.storage.save_file(file_bytes, filename, document_id)
 
         # 4. Parse PDF (Text + Tables)
@@ -124,7 +171,9 @@ class DocumentAgentService:
 
         # 5. Structure-Aware & Token-Aware Chunking
         chunks = self.chunker.chunk_pages(parsed_pages, document_id, filename)
-
+        for chunk in chunks:
+            chunk["user_id"] = user_id
+            chunk["workspace_id"] = workspace_id
         # 6. Register initial record before vector storage
         storage_provider = getattr(self.storage, "get_storage_provider", lambda: "local")()
         object_key = getattr(self.storage, "get_object_key", lambda doc_id: f"{doc_id}.pdf")(document_id)
@@ -137,7 +186,8 @@ class DocumentAgentService:
 
         doc_record = {
             "document_id": document_id,
-            "workspace_id": workspace_id or "default-workspace",
+            "workspace_id": workspace_id,
+            "user_id": user_id,
             "sha256": file_hash,
             "filename": filename,
             "stored_filename": object_key,
@@ -222,6 +272,122 @@ class DocumentAgentService:
             session_id=session_id,
         )
 
+
+    def reindex_owned_document(
+        self,
+        document_id: str,
+        *,
+        user_id: str
+    ) -> Dict[str, Any]:
+
+        if not user_id:
+            raise ValueError("Authentication is required.")
+
+        document = self.repo.get_user_document(
+            document_id, user_id
+        )
+
+        if not document:
+            raise ValueError("Document not found.")
+
+        workspace_id = document["workspace_id"]
+        filename = document["filename"]
+
+        metadata = dict(document.get("metadata") or {})
+
+        object_key = (
+            metadata.get("object_key")
+            or document.get("stored_filename")
+        )
+
+        file_bytes = self.storage.get_file_bytes(
+            document_id,
+            object_key=object_key
+        )
+
+        if not file_bytes:
+            raise ValueError("Original PDF is unavailable.")
+
+        if len(file_bytes) > self.settings.max_file_size:
+            raise ValueError("PDF exceeds the file size limit.")
+
+        file_hash = hashlib.sha256(file_bytes).hexdigest()
+
+        if file_hash != document["sha256"]:
+            raise ValueError("Stored PDF integrity check failed.")
+
+        parsed_pages = self.parser.parse_pdf(file_bytes)
+
+        total_pages = len(parsed_pages)
+
+        full_text = "\n\n".join(
+            p.text for p in parsed_pages if p.text
+        ).strip()
+
+        chunks = self.chunker.chunk_pages(
+            parsed_pages,
+            document_id,
+            filename
+        )
+
+        if not chunks:
+            raise ValueError("No indexable text found in PDF.")
+
+        for chunk in chunks:
+            chunk["user_id"] = user_id
+            chunk["workspace_id"] = workspace_id
+
+        embeddings = generate_embeddings(
+            [chunk["text"] for chunk in chunks]
+        )
+
+        self.vector_store.upsert_chunks(
+            chunks, embeddings
+        )
+
+        verified_chunks = self.vector_store.get_chunks_by_document(
+            document_id,
+            user_id=user_id,
+            workspace_id=workspace_id
+        )
+
+        expected_ids = {
+            chunk["chunk_id"] for chunk in chunks
+        }
+
+        actual_ids = {
+            chunk["chunk_id"] for chunk in verified_chunks
+        }
+
+        if expected_ids != actual_ids:
+            raise RuntimeError(
+                "Vector index verification failed."
+            )
+
+        metadata.update({
+            "tables_detected": sum(
+                len(p.tables) for p in parsed_pages
+            ),
+            "embedding_dimension": get_embedding_dimension(),
+            "ownership_verified": True
+        })
+
+        self.repo.update_document_indexed(
+            document_id=document_id,
+            indexed=1,
+            chunk_count=len(chunks),
+            total_pages=total_pages,
+            total_characters=len(full_text),
+            metadata=metadata
+        )
+
+        return {
+            "document_id": document_id,
+            "total_pages": total_pages,
+            "total_characters": len(full_text),
+            "chunk_count": len(chunks),
+            "indexed": True
+        }
     def search(
         self,
         query: str,
@@ -229,24 +395,99 @@ class DocumentAgentService:
         document_id: Optional[str] = None,
         session_id: Optional[str] = None,
         filter_tables_only: Optional[bool] = None,
+        *,
+        user_id: str
     ) -> SearchResponse:
-        """Execute semantic search over indexed financial document passages."""
+
         clean_query = query.strip()
+
         if not clean_query:
-            raise ValueError("Query string must not be empty.")
+            raise ValueError("Query must not be empty.")
 
-        query_emb = generate_embeddings([clean_query])[0]
+        if not user_id:
+            raise ValueError("Authentication is required.")
 
-        filters: Dict[str, Any] = {}
+        session = None
+
+        if session_id:
+            session = self.repo.get_user_session(
+                session_id, user_id
+            )
+
+            if not session:
+                raise ValueError("Session not found.")
+
         if document_id:
-            filters["document_id"] = document_id
-        if filter_tables_only:
-            filters["is_table"] = True
+            document_ids = [document_id]
 
-        raw_results = self.vector_store.search_chunks(
-            query_embedding=query_emb,
-            top_k=top_k,
-            filters=filters,
+        elif session:
+            document_ids = session.get("document_ids") or []
+
+        else:
+            document_ids = [
+                d["document_id"]
+                for d in self.repo.list_user_documents(
+                    user_id=user_id
+                )
+                if d.get("indexed")
+            ]
+
+        documents = []
+
+        for doc_id in dict.fromkeys(document_ids):
+
+            doc = self.repo.get_user_document(
+                doc_id, user_id
+            )
+
+            if not doc:
+                raise ValueError("Document not found.")
+
+            if session:
+                if (
+                    doc["workspace_id"] != session["workspace_id"]
+                    or doc_id not in (session.get("document_ids") or [])
+                ):
+                    raise ValueError("Document not found in session.")
+
+            if doc.get("indexed"):
+                documents.append(doc)
+
+        raw_results = []
+
+        if documents:
+
+            query_emb = generate_embeddings([clean_query])[0]
+
+            for doc in documents:
+
+                filters = {
+                    "document_id": doc["document_id"],
+                    "user_id": user_id,
+                    "workspace_id": doc["workspace_id"]
+                }
+
+                if filter_tables_only:
+                    filters["is_table"] = True
+
+                matches = self.vector_store.search_chunks(
+                    query_embedding=query_emb,
+                    top_k=top_k,
+                    filters=filters
+                )
+
+                for match in matches:
+
+                    metadata = match.get("metadata") or {}
+
+                    if all(
+                        metadata.get(key) == value
+                        for key, value in filters.items()
+                    ):
+                        raw_results.append(match)
+
+        raw_results.sort(
+            key=lambda r: r["distance"]
         )
 
         items = [
@@ -255,19 +496,16 @@ class DocumentAgentService:
                 text=r["text"],
                 metadata=r["metadata"],
                 distance=r["distance"],
-                score=r.get("score"),
+                score=r.get("score")
             )
-            for r in raw_results
+            for r in raw_results[:top_k]
         ]
-
-        # Identify which retriever was active
-        retriever_name = type(self.vector_store).__name__
 
         return SearchResponse(
             query=clean_query,
             result_count=len(items),
             results=items,
-            retriever_used=retriever_name,
+            retriever_used=type(self.vector_store).__name__
         )
 
     def get_document_summary(self, document_id: str) -> Optional[DocumentSummary]:

@@ -20,9 +20,11 @@ import os
 import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-
-from app.infrastructure.vector_store.base import VectorStoreInterface
-
+from app.infrastructure.vector_store.base import (
+    VectorStoreInterface,
+    validate_chunk_ownership,
+    validate_search_filters
+)
 logger = logging.getLogger(__name__)
 
 
@@ -74,6 +76,7 @@ class LocalJSONVectorStore(VectorStoreInterface):
         chunks: List[Dict[str, Any]],
         embeddings: List[List[float]],
     ) -> int:
+        validate_chunk_ownership(chunks)
         if len(chunks) != len(embeddings):
             raise ValueError("Each chunk must have exactly one embedding.")
         if not chunks:
@@ -87,6 +90,8 @@ class LocalJSONVectorStore(VectorStoreInterface):
                     "embedding": [float(v) for v in embedding],
                     "metadata": {
                         "document_id": str(chunk["document_id"]),
+                        "user_id": chunk["user_id"],
+                        "workspace_id": chunk["workspace_id"],
                         "filename": str(chunk.get("filename", "")),
                         "page_number": int(chunk.get("page_number", 1)),
                         "page_chunk_index": int(chunk.get("page_chunk_index", 1)),
@@ -103,6 +108,7 @@ class LocalJSONVectorStore(VectorStoreInterface):
         top_k: int = 5,
         filters: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
+        filters = validate_search_filters(filters)
         if not self._records:
             return []
 
@@ -129,40 +135,57 @@ class LocalJSONVectorStore(VectorStoreInterface):
     def count_chunks(self) -> int:
         return len(self._records)
 
-    def get_chunks_by_document(self, document_id: str) -> List[Dict[str, Any]]:
-        matches = []
-        for chunk_id, record in self._records.items():
-            metadata = record["metadata"]
-            if metadata.get("document_id") != str(document_id):
-                continue
-            matches.append(
-                {
-                    "chunk_id": chunk_id,
-                    "text": record["text"],
-                    "page_number": metadata.get("page_number", 1),
-                    "is_table": metadata.get("is_table", False),
-                    "section": metadata.get("section", ""),
-                    "metadata": metadata,
-                }
-            )
-        matches.sort(key=lambda item: (item["page_number"], item["metadata"].get("page_chunk_index", 1)))
-        return matches
+    def get_chunks_by_document(
+        self,
+        document_id: str,
+        *,
+        user_id: str,
+        workspace_id: str
+    ) -> List[Dict[str, Any]]:
 
+        predicate = self._matches({
+            "document_id": document_id,
+            "user_id": user_id,
+            "workspace_id": workspace_id
+        })
+
+        matches = []
+
+        for chunk_id, record in self._records.items():
+
+            metadata = record["metadata"]
+
+            if not predicate(metadata):
+                continue
+
+            matches.append({
+                "chunk_id": chunk_id,
+                "text": record["text"],
+                "page_number": metadata.get("page_number", 1),
+                "is_table": metadata.get("is_table", False),
+                "section": metadata.get("section", ""),
+                "metadata": metadata
+            })
+
+        matches.sort(
+            key=lambda item: (
+                item["page_number"],
+                item["metadata"].get("page_chunk_index", 1)
+            )
+        )
+
+        return matches
     # -------------------------------------------------------------------- helpers
     @staticmethod
-    def _matches(filters: Optional[Dict[str, Any]]):
-        if not filters:
-            return lambda metadata: True
+    def _matches(filters):
+        filters = validate_search_filters(filters)
 
-        document_id = filters.get("document_id")
-        is_table = filters.get("is_table")
-
-        def predicate(metadata: Dict[str, Any]) -> bool:
-            if document_id and metadata.get("document_id") != str(document_id):
-                return False
-            if is_table is not None and bool(metadata.get("is_table")) is not bool(is_table):
-                return False
-            return True
+        def predicate(metadata):
+            return all(
+                metadata.get(key) == value
+                for key, value in filters.items()
+                if value is not None
+            )
 
         return predicate
 

@@ -11,7 +11,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from app.config import get_settings
-from app.infrastructure.vector_store.base import VectorStoreInterface
+from app.infrastructure.vector_store.base import (
+    VectorStoreInterface,
+    validate_chunk_ownership,
+    validate_search_filters
+)
 from app.infrastructure.vector_store.fallback import LocalJSONVectorStore
 
 logger = logging.getLogger(__name__)
@@ -68,11 +72,51 @@ class ChromaVectorStore(VectorStoreInterface):
         except Exception:
             return False
 
+    def delete_owned_chunks(
+        self,
+        document_id: str,
+        *,
+        user_id: str,
+        workspace_id: str
+    ) -> bool:
+
+        filters = validate_search_filters({
+            "document_id": document_id,
+            "user_id": user_id,
+            "workspace_id": workspace_id
+        })
+
+        chunks = self.get_chunks_by_document(
+            document_id,
+            user_id=user_id,
+            workspace_id=workspace_id
+        )
+
+        if chunks:
+
+            self.collection.delete(
+                where={
+                    "$and": [
+                        {key: value}
+                        for key, value in filters.items()
+                    ]
+                }
+            )
+
+        remaining = self.get_chunks_by_document(
+            document_id,
+            user_id=user_id,
+            workspace_id=workspace_id
+        )
+
+        return len(remaining) == 0
     def upsert_chunks(
         self,
         chunks: List[Dict[str, Any]],
         embeddings: List[List[float]],
     ) -> int:
+        validate_chunk_ownership(chunks)
+
         if self._fallback is not None:
             return self._fallback.upsert_chunks(chunks, embeddings)
 
@@ -86,6 +130,8 @@ class ChromaVectorStore(VectorStoreInterface):
         metadatas = [
             {
                 "document_id": str(c["document_id"]),
+                "user_id": c["user_id"],
+                "workspace_id": c["workspace_id"],
                 "filename": str(c.get("filename", "")),
                 "page_number": int(c.get("page_number", 1)),
                 "page_chunk_index": int(c.get("page_chunk_index", 1)),
@@ -113,79 +159,119 @@ class ChromaVectorStore(VectorStoreInterface):
         top_k: int = 5,
         filters: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
+
+        filters = validate_search_filters(filters)
+
         if self._fallback is not None:
             return self._fallback.search_chunks(
-                query_embedding, top_k=top_k, filters=filters
+                query_embedding,
+                top_k=top_k,
+                filters=filters
             )
 
         total = self.collection.count()
-        if total == 0:
+
+        if total == 0 or top_k <= 0:
             return []
 
-        where_clause = None
-        if filters:
-            conditions = []
-            if "document_id" in filters and filters["document_id"]:
-                conditions.append({"document_id": str(filters["document_id"])})
-            if "is_table" in filters and filters["is_table"] is not None:
-                conditions.append({"is_table": bool(filters["is_table"])})
+        conditions = [
+            {"user_id": filters["user_id"]},
+            {"workspace_id": filters["workspace_id"]},
+            {"document_id": filters["document_id"]}
+        ]
 
-            if len(conditions) == 1:
-                where_clause = conditions[0]
-            elif len(conditions) > 1:
-                where_clause = {"$and": conditions}
+        if filters.get("is_table") is not None:
+            conditions.append({
+                "is_table": filters["is_table"]
+            })
 
         results = self.collection.query(
             query_embeddings=[query_embedding],
             n_results=min(top_k, total),
-            where=where_clause,
-            include=["documents", "metadatas", "distances"],
+            where={"$and": conditions},
+            include=["documents", "metadatas", "distances"]
         )
 
         matches = []
+
         if results and results.get("ids") and results["ids"][0]:
             for idx, chunk_id in enumerate(results["ids"][0]):
+
+                metadata = results["metadatas"][0][idx] or {}
+
+                if any(
+                    metadata.get(key) != value
+                    for key, value in filters.items()
+                    if value is not None
+                ):
+                    continue
+
+                distance = float(results["distances"][0][idx])
+
                 matches.append({
                     "chunk_id": chunk_id,
                     "text": results["documents"][0][idx],
-                    "metadata": results["metadatas"][0][idx],
-                    "distance": float(results["distances"][0][idx]),
-                    "score": round(1.0 - float(results["distances"][0][idx]), 4),
+                    "metadata": metadata,
+                    "distance": distance,
+                    "score": round(1.0 - distance, 4)
                 })
 
         return matches
-
     def count_chunks(self) -> int:
         if self._fallback is not None:
             return self._fallback.count_chunks()
         return self.collection.count()
 
-    def get_chunks_by_document(self, document_id: str) -> List[Dict[str, Any]]:
-        """Retrieve all chunks belonging to a document directly."""
-        if self._fallback is not None:
-            return self._fallback.get_chunks_by_document(document_id)
-        try:
-            total = self.collection.count()
-            if total == 0:
-                return []
-            res = self.collection.get(
-                where={"document_id": str(document_id)},
-                include=["documents", "metadatas"],
-            )
-            chunks = []
-            if res and res.get("ids"):
-                for idx, chunk_id in enumerate(res["ids"]):
-                    meta = res["metadatas"][idx] if res.get("metadatas") else {}
-                    chunks.append({
-                        "chunk_id": chunk_id,
-                        "text": res["documents"][idx] if res.get("documents") else "",
-                        "page_number": meta.get("page_number", 1),
-                        "is_table": meta.get("is_table", False),
-                        "section": meta.get("section", ""),
-                        "metadata": meta,
-                    })
-            return chunks
-        except Exception as e:
-            logger.warning("Error fetching chunks by document %s: %s", document_id, e)
-            return []
+    def get_chunks_by_document(
+        self,
+        document_id: str,
+        *,
+        user_id: str,
+        workspace_id: str
+    ) -> List[Dict[str, Any]]:
 
+        filters = validate_search_filters({
+            "document_id": document_id,
+            "user_id": user_id,
+            "workspace_id": workspace_id
+        })
+
+        if self._fallback is not None:
+            return self._fallback.get_chunks_by_document(
+                document_id,
+                user_id=user_id,
+                workspace_id=workspace_id
+            )
+
+        res = self.collection.get(
+            where={
+                "$and": [
+                    {key: value}
+                    for key, value in filters.items()
+                ]
+            },
+            include=["documents", "metadatas"]
+        )
+
+        chunks = []
+
+        for idx, chunk_id in enumerate(res["ids"]):
+
+            meta = res["metadatas"][idx] or {}
+
+            if any(
+                meta.get(key) != value
+                for key, value in filters.items()
+            ):
+                continue
+
+            chunks.append({
+                "chunk_id": chunk_id,
+                "text": res["documents"][idx],
+                "page_number": meta.get("page_number", 1),
+                "is_table": meta.get("is_table", False),
+                "section": meta.get("section", ""),
+                "metadata": meta
+            })
+
+        return chunks

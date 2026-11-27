@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from "react";
+import { api } from "../services/api";
 import {
   FileText,
   ChevronLeft,
@@ -26,7 +27,59 @@ export default function DocumentViewer({
 }) {
   const [currentPage, setCurrentPage] = useState(initialPage || (doc?.sections?.[2]?.page || 112));
   const [zoomLevel, setZoomLevel] = useState(100);
-  const [viewMode, setViewMode] = useState(doc?.blobUrl ? "native" : "parsed"); // "native" | "parsed"
+  const [viewMode, setViewMode] = useState("native");
+  const [pdfUrl, setPdfUrl] = useState(null);
+  const [pdfLoading, setPdfLoading] = useState(false);
+  const [pdfError, setPdfError] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    let objectUrl = null;
+
+    const controller = new AbortController();
+
+    setPdfUrl(null);
+    setPdfError(null);
+    setViewMode("native");
+
+    async function loadPdf() {
+      if (!doc?.id) return;
+
+      setPdfLoading(true);
+
+      try {
+        const blob = await api.getDocumentFile(
+          doc.id,
+          controller.signal
+        );
+
+        if (cancelled) return;
+
+        objectUrl = URL.createObjectURL(blob);
+        setPdfUrl(objectUrl);
+
+      } catch (err) {
+        if (!cancelled) {
+          setPdfError("Unable to load this PDF");
+        }
+      } finally {
+        if (!cancelled) {
+          setPdfLoading(false);
+        }
+      }
+    }
+
+    loadPdf();
+
+    return () => {
+      cancelled = true;
+      controller.abort();
+
+      if (objectUrl) {
+        URL.revokeObjectURL(objectUrl);
+      }
+    };
+  }, [doc?.id]);
   const [inDocSearch, setInDocSearch] = useState("");
   const [activeThumbnailIndex, setActiveThumbnailIndex] = useState(0);
 
@@ -78,7 +131,7 @@ export default function DocumentViewer({
           <span className="doc-viewer-filename truncate max-w-xs" title={doc?.name}>
             {doc?.name}
           </span>
-          {doc?.blobUrl && (
+          {pdfUrl && (
             <div className="viewer-mode-toggle ml-2">
               <button
                 type="button"
@@ -91,6 +144,8 @@ export default function DocumentViewer({
                 type="button"
                 className={`mode-btn ${viewMode === "parsed" ? "active" : ""}`}
                 onClick={() => setViewMode("parsed")}
+                disabled={true}
+                title="Extracted page preview is not available yet"
               >
                 Audited Page View
               </button>
@@ -164,9 +219,9 @@ export default function DocumentViewer({
             </>
           )}
 
-          {doc?.blobUrl && (
+          {pdfUrl && (
             <a
-              href={doc.blobUrl}
+              href={pdfUrl}
               target="_blank"
               rel="noreferrer"
               className="open-external-btn"
@@ -217,9 +272,17 @@ export default function DocumentViewer({
 
         {/* Center Document Display */}
         <div className="doc-canvas-viewport">
-          {viewMode === "native" && doc?.blobUrl ? (
+          {pdfLoading ? (
+            <div className="p-6 text-center">
+              Loading authenticated PDF...
+            </div>
+          ) : pdfError ? (
+            <div className="p-6 text-center text-red-500">
+              {pdfError}
+            </div>
+          ) : viewMode === "native" && pdfUrl ? (
             <iframe
-              src={doc.blobUrl}
+              src={pdfUrl}
               title={doc.name}
               className="native-pdf-iframe"
             />

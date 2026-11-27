@@ -8,7 +8,6 @@ import DeleteConfirmModal from "../components/report/DeleteConfirmModal";
 import {
   getStoredReports,
   saveStoredReports,
-  INITIAL_REPORTS,
   generateStructuredReportContent
 } from "../data/reportData";
 
@@ -25,7 +24,7 @@ export default function ReportView({
       const match = reports.find((r) => r.sessionId === session.id);
       if (match) return match;
     }
-    return reports[0] || INITIAL_REPORTS[0];
+    return reports[0] || null;
   });
 
   // Modals state
@@ -58,6 +57,12 @@ export default function ReportView({
 
   // Handle generating a new report (with simulated pipeline)
   function handleCreateReport(config) {
+    if (config.status === "Generating") {
+      window.alert(
+        "Live report generation is not connected to this interface yet."
+      );
+      return;
+    }
     const newReport = {
       id: `rep-${Date.now()}`,
       createdAt: new Date().toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }),

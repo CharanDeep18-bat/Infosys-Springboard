@@ -35,15 +35,91 @@ function normalizePageName(page) {
   return "Dashboard";
 }
 
+function mapBackendSession(s) {
+  return {
+    id: s.session_id,
+    title: s.title,
+    description: s.description || "",
+    company: s.metadata?.company || "",
+    researchType: s.metadata?.researchType || "General Research",
+    objective: s.metadata?.objective || s.description || "",
+    companyIds: [],
+    status: s.status || "ACTIVE",
+    createdAt: s.created_at
+      ? new Date(s.created_at).toLocaleDateString()
+      : null,
+    documents: (s.document_ids || []).map((id) => ({
+      id,
+      name: id
+    }))
+  };
+}
+
 export default function App() {
   const { user, loading } = useAuth();
+
+  if (loading) {
+    return (
+      <div style={{
+        minHeight: "100vh",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        background: "#0f172a",
+        color: "#ffffff"
+      }}>
+        Checking authentication...
+      </div>
+    );
+  }
+
+  if (!user) {
+    return <Login />;
+  }
+
+  return <AuthenticatedApp key={user.id} user={user} />;
+}
+
+function AuthenticatedApp({ user }) {
+
+  async function refreshDocuments() {
+    try {
+      const liveDocs = await api.listDocuments();
+
+      saveDocuments(liveDocs);
+
+      const workspace = await api.getDefaultWorkspace();
+
+      const liveSessions = await api.listWorkspaceSessions(
+        workspace.workspace_id
+      );
+
+      const mapped = liveSessions.map(mapBackendSession);
+
+      saveSessions(mapped);
+
+      setActiveSession((previous) =>
+        mapped.find((s) => s.id === previous?.id)
+        || mapped[0]
+        || null
+      );
+
+      return liveDocs;
+
+    } catch (err) {
+      saveDocuments([]);
+      console.error("Refresh failed:", err);
+      toast.error("Unable to refresh research data");
+      return [];
+    }
+  }
   const [theme, setTheme] = useState(
     () => localStorage.getItem("finresearch_theme") || "dark"
   );
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [uploadModalOpen, setUploadModalOpen] = useState(false);
   const [createModalOpen, setCreateModalOpen] = useState(false);
-
+  const [isSessionMutating, setIsSessionMutating] = useState(false);
   // Active top-level page
   const [activePage, setActivePage] = useState(() => {
     try {
@@ -73,58 +149,20 @@ export default function App() {
     setSidebarCollapsed((prev) => !prev);
   }
 
-  // Sessions state (cleaned of hardcoded mock data)
-  const [sessions, setSessions] = useState(() => {
-    try {
-      const stored = localStorage.getItem("finresearch_sessions_clean");
-      if (stored !== null) {
-        const parsed = JSON.parse(stored);
-        if (Array.isArray(parsed)) return parsed;
-      }
-    } catch {}
-    return [];
-  });
+const [workspaceId, setWorkspaceId] = useState(null);
+const [sessions, setSessions] = useState([]);
+const [activeSession, setActiveSession] = useState(null);
+const [documents, setDocuments] = useState([]);
 
-  // Active session
-  const [activeSession, setActiveSession] = useState(() => {
-    try {
-      const savedId = localStorage.getItem("finresearch_active_session_id_clean");
-      if (savedId && sessions.length > 0) {
-        const found = sessions.find((s) => s.id === savedId);
-        if (found) return found;
-      }
-    } catch {}
-    return sessions.length > 0 ? sessions[0] : null;
-  });
+function saveDocuments(newDocs) {
+  setDocuments(Array.isArray(newDocs) ? newDocs : []);
+}
 
-  // Documents state (cleaned of hardcoded mock data)
-  const [documents, setDocuments] = useState(() => {
-    try {
-      const raw = localStorage.getItem("finresearch_documents_clean");
-      if (raw !== null) {
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed)) return parsed;
-      }
-    } catch {}
-    return [];
-  });
-
-  function saveDocuments(newDocs) {
-    const valid = Array.isArray(newDocs) ? newDocs : [];
-    setDocuments(valid);
-    try {
-      localStorage.setItem("finresearch_documents_clean", JSON.stringify(valid));
-    } catch {}
-  }
-
-  function saveSessions(updatedSessions) {
-    const valid = Array.isArray(updatedSessions) ? updatedSessions : [];
-    setSessions(valid);
-    try {
-      localStorage.setItem("finresearch_sessions_clean", JSON.stringify(valid));
-    } catch {}
-  }
-
+function saveSessions(updatedSessions) {
+  setSessions(
+    Array.isArray(updatedSessions) ? updatedSessions : []
+  );
+}
   // Backend Connectivity & Auto-detection
   const [backendStatus, setBackendStatus] = useState("checking"); // "live" | "mock" | "checking"
   const [backendInfo, setBackendInfo] = useState(null);
@@ -170,46 +208,36 @@ export default function App() {
           }
         }
         // Load actual live documents from backend (authoritative backend data overrides local cache)
-        try {
-          const liveDocs = await api.listDocuments();
-          const localDocs = getStoredDocuments();
-          if (Array.isArray(liveDocs) && liveDocs.length > 0) {
-            const merged = liveDocs.map((ld) => {
-              const matched = localDocs.find((loc) => loc.id === ld.id || loc.name === ld.name);
-              return matched ? { ...matched, ...ld, id: ld.id } : ld;
-            });
-            saveDocuments(merged);
-          } else if (localDocs.length > 0) {
-            saveDocuments(localDocs);
-          } else {
-            saveDocuments([]);
-          }
-        } catch (e) {
-          console.warn("Could not load documents from live backend:", e);
-        }
+        
+        await refreshDocuments();        
 
         // Load actual live sessions from backend
         try {
-          const liveSessions = await api.listWorkspaceSessions("default-workspace");
-          if (Array.isArray(liveSessions) && liveSessions.length > 0) {
-            const mapped = liveSessions.map((s) => ({
-              id: s.session_id || s.id,
-              title: s.title,
-              description: s.description || "Research Session",
-              company: s.title?.split(":")?.[0] || "Entity",
-              companyIds: [],
-              researchType: "Company Research",
-              status: s.status || "ACTIVE",
-              createdAt: s.created_at ? new Date(s.created_at).toLocaleDateString() : null,
-              documents: (s.document_ids || []).map((id) => ({ id, name: id }))
-            }));
-            saveSessions(mapped);
-            if (!activeSession && mapped.length > 0) {
-              setActiveSession(mapped[0]);
-            }
-          }
+          const workspace = await api.getDefaultWorkspace();
+
+          setWorkspaceId(workspace.workspace_id);
+
+          const liveSessions = await api.listWorkspaceSessions(
+            workspace.workspace_id
+          );
+
+          const mapped = liveSessions.map(mapBackendSession);
+
+          saveSessions(mapped);
+
+          setActiveSession((previous) =>
+            mapped.find((s) => s.id === previous?.id)
+            || mapped[0]
+            || null
+          );
+
         } catch (e) {
-          console.warn("Could not load sessions from backend:", e);
+          setWorkspaceId(null);
+          saveSessions([]);
+          setActiveSession(null);
+
+          console.error("Could not load research sessions:", e);
+          toast.error("Unable to load your research sessions");
         }
       } else {
         setBackendStatus("offline");
@@ -248,23 +276,10 @@ export default function App() {
   }
 
   useEffect(() => {
-  if (loading) return;
+    checkBackend();
+  }, [user.id]);
 
-  if (!user) {
-    setBackendStatus("checking");
-    return;
-  }
 
-  checkBackend();
-}, [loading, user?.id]);
-
-  useEffect(() => {
-    if (activeSession?.id) {
-      try {
-        localStorage.setItem("finresearch_active_session_id", activeSession.id);
-      } catch {}
-    }
-  }, [activeSession?.id]);
 
   useEffect(() => {
     function handlePopState() {
@@ -375,77 +390,171 @@ export default function App() {
 
   // Session CRUD Handlers
   async function handleCreateSession(newSession) {
-    const sessionWithId = {
-      id: newSession.id || `session-${Date.now()}`,
-      ...newSession
-    };
-    const updated = [sessionWithId, ...sessions];
-    saveSessions(updated);
-    setActiveSession(sessionWithId);
-    setSessionSubView("details");
-
-    // Also persist session to live FastAPI backend when connected
     try {
-      await api.createSession("default-workspace", {
-        title: sessionWithId.title,
-        description: sessionWithId.description || sessionWithId.objective || ""
-      });
-      toast.success(`Session "${sessionWithId.title}" saved to database!`);
+      const workspace = await api.getDefaultWorkspace();
+
+      setWorkspaceId(workspace.workspace_id);
+
+      const created = await api.createSession(
+        workspace.workspace_id,
+        {
+          title: newSession.title,
+          metadata: {
+            company: newSession.company || "",
+            researchType: newSession.researchType || "",
+            objective: newSession.objective || ""
+          },
+          description:
+            newSession.description ||
+            newSession.objective ||
+            ""
+        }
+      );
+
+
+
+      const sessionWithId = {
+        ...newSession,
+        ...mapBackendSession(created)
+      };
+
+      setSessions((previous) => [
+        sessionWithId,
+        ...previous
+      ]);
+
+      setActiveSession(sessionWithId);
+      setSessionSubView("details");
+
+      toast.success(
+        `Session "${sessionWithId.title}" created successfully!`
+      );
+
+      return sessionWithId;
+
     } catch (err) {
-      console.warn("Backend session persistence failed:", err);
+      console.error("Session creation failed:", err);
+      toast.error("Unable to create research session");
+      return null;
     }
   }
 
-  function handleUpdateSession(updatedSession) {
-    const updated = sessions.map((s) => (s.id === updatedSession.id ? updatedSession : s));
-    saveSessions(updated);
-    if (activeSession?.id === updatedSession.id) {
-      setActiveSession(updatedSession);
+  // function handleUpdateSession(updatedSession) {
+  //   const updated = sessions.map((s) => (s.id === updatedSession.id ? updatedSession : s));
+  //   saveSessions(updated);
+  //   if (activeSession?.id === updatedSession.id) {
+  //     setActiveSession(updatedSession);
+  //   }
+  // }
+
+  async function handleDuplicateSession(sessionToDup) {
+    if (isSessionMutating) return;
+
+    setIsSessionMutating(true);
+
+    try {
+      const result = await api.duplicateSession(
+        sessionToDup.id
+      );
+
+      const duplicated = mapBackendSession(result);
+
+      saveSessions([duplicated, ...sessions]);
+
+      setActiveSession(duplicated);
+      setSessionSubView("details");
+
+      toast.success("Research session duplicated.");
+
+    } catch (err) {
+      toast.error(`Duplication failed: ${err.message}`);
+    } finally {
+      setIsSessionMutating(false);
     }
   }
 
-  function handleDuplicateSession(sessionToDup) {
-    const duplicated = {
-      ...sessionToDup,
-      id: crypto.randomUUID(),
-      title: `${sessionToDup.title} (Copy)`,
-      createdAt: new Date().toLocaleDateString()
-    };
-    const updated = [duplicated, ...sessions];
-    saveSessions(updated);
-    setActiveSession(duplicated);
-    setSessionSubView("details");
-  }
+  // function handleDeleteSession(sessionId) {
+  //   const updated = sessions.filter((s) => s.id !== sessionId);
+  //   saveSessions(updated);
+  //   if (activeSession?.id === sessionId) {
+  //     setActiveSession(updated[0] || null);
+  //   }
+  //   setSessionSubView("directory");
+  //   toast.success("Research session removed.");
+  // }
 
-  function handleDeleteSession(sessionId) {
-    const updated = sessions.filter((s) => s.id !== sessionId);
-    saveSessions(updated);
-    if (activeSession?.id === sessionId) {
-      setActiveSession(updated[0] || null);
+  async function handleUpdateSession(updatedSession) {
+    if (isSessionMutating) return;
+
+    setIsSessionMutating(true);
+
+    try {
+      const result = await api.updateSession(
+        updatedSession.id,
+        {
+          title: updatedSession.title,
+          metadata: {
+            company: updatedSession.company || "",
+            researchType: updatedSession.researchType || "",
+            objective: updatedSession.objective || ""
+          },
+          description: updatedSession.description || ""
+        }
+      );
+
+      const mapped = {
+        ...updatedSession,
+        ...mapBackendSession(result)
+      };
+
+      const updated = sessions.map(
+        s => s.id === mapped.id ? mapped : s
+      );
+
+      saveSessions(updated);
+
+      if (activeSession?.id === mapped.id) {
+        setActiveSession(mapped);
+      }
+
+      toast.success("Research session updated.");
+
+    } catch (err) {
+      toast.error(`Session update failed: ${err.message}`);
+    } finally {
+      setIsSessionMutating(false);
     }
-    setSessionSubView("directory");
-    toast.success("Research session removed.");
-  }
-  if (loading) {
-    return (
-      <div
-        style={{
-          minHeight: "100vh",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          background: "#0f172a",
-          color: "#ffffff",
-          fontSize: "16px",
-        }}
-      >
-        Checking authentication...
-      </div>
-    );
   }
 
-  if (!user) {
-    return <Login />;
+  async function handleDeleteSession(sessionId) {
+    if (isSessionMutating) return;
+
+    setIsSessionMutating(true);
+
+    try {
+      await api.deleteSession(sessionId);
+
+      const updated = sessions.filter(
+        s => s.id !== sessionId
+      );
+
+      saveSessions(updated);
+
+      if (activeSession?.id === sessionId) {
+        setActiveSession(updated[0] || null);
+      }
+
+      setSessionSubView("directory");
+
+      toast.success("Research session deleted.");
+
+      await refreshDocuments();
+
+    } catch (err) {
+      toast.error(`Session deletion failed: ${err.message}`);
+    } finally {
+      setIsSessionMutating(false);
+    }
   }
 
   return (
@@ -535,7 +644,7 @@ export default function App() {
           {activePage === "Documents" && (
             <DocumentLibrary
               documents={documents}
-              onUpdateDocuments={saveDocuments}
+              onUpdateDocuments={refreshDocuments}
               sessions={sessions}
               activeSession={activeSession}
               setActiveSession={setActiveSession}
@@ -624,9 +733,7 @@ export default function App() {
       <UploadDocumentModal
         open={uploadModalOpen}
         onClose={() => setUploadModalOpen(false)}
-        onUploadSuccess={(doc) => {
-          saveDocuments([doc, ...documents]);
-        }}
+        onUploadSuccess={refreshDocuments}
       />
 
       {/* Lightweight Create Session Modal */}

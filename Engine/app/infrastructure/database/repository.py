@@ -14,6 +14,7 @@ from app.config import get_settings
 from app.infrastructure.database.models import POSTGRES_SCHEMA_SQL, SQLITE_SCHEMA_SQL
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -219,6 +220,42 @@ class SQLiteRepository(DatabaseRepositoryInterface):
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize_schema()
 
+    def get_or_create_default_workspace(
+        self,
+        user_id: str,
+    ) -> Dict[str, Any]:
+
+        workspace_id = f"default-{user_id}"
+        now = utc_now_iso()
+
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO workspaces
+                (workspace_id, user_id, name, description,
+                created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(workspace_id) DO NOTHING
+                """,
+                (
+                    workspace_id,
+                    user_id,
+                    "Default Workspace",
+                    "Personal research workspace",
+                    now,
+                    now
+                ),
+            )
+
+        workspace = self.get_user_workspace(
+            workspace_id=workspace_id,
+            user_id=user_id
+        )
+
+        if workspace is None:
+            raise ValueError("Workspace ownership conflict")
+
+        return workspace
     @contextmanager
     def _get_connection(self):
         if self._is_memory:
@@ -242,6 +279,48 @@ class SQLiteRepository(DatabaseRepositoryInterface):
         """Run migrations and ensure all tables and columns exist."""
         with self._get_connection() as conn:
             conn.executescript(SQLITE_SCHEMA_SQL)
+
+            workspace_columns = {
+                row[1]
+                for row in conn.execute(
+                    "PRAGMA table_info(workspaces)"
+                ).fetchall()
+            }
+
+            if "user_id" not in workspace_columns:
+                conn.execute(
+                    "ALTER TABLE workspaces ADD COLUMN user_id TEXT"
+                )
+
+            session_columns = {
+                row[1]
+                for row in conn.execute(
+                    "PRAGMA table_info(research_sessions)"
+                ).fetchall()
+            }
+
+            if "user_id" not in session_columns:
+                conn.execute(
+                    "ALTER TABLE research_sessions ADD COLUMN user_id TEXT"
+                )
+
+            if "metadata" not in session_columns:
+                conn.execute(
+                    """
+                    ALTER TABLE research_sessions
+                    ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}'
+                    """
+                )
+
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_workspaces_user_id "
+                "ON workspaces(user_id)"
+            )
+
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_research_sessions_user_id "
+                "ON research_sessions(user_id)"
+            )
 
             # Ensure columns exist on legacy tables
             columns = {
@@ -304,6 +383,38 @@ class SQLiteRepository(DatabaseRepositoryInterface):
             "document_count": 0,
         }
 
+    
+    def create_user_workspace(
+        self,
+        user_id: str,
+        name: str,
+        description: Optional[str] = None,
+    ) -> Dict[str, Any]:
+
+        ws_id = uuid4().hex
+        now = utc_now_iso()
+
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO workspaces
+                (workspace_id, user_id, name, description,
+                created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (ws_id, user_id, name, description, now, now),
+            )
+
+        return {
+            "workspace_id": ws_id,
+            "user_id": user_id,
+            "name": name,
+            "description": description,
+            "created_at": now,
+            "updated_at": now,
+            "session_count": 0,
+            "document_count": 0,
+        }
     def get_workspace(self, workspace_id: str) -> Optional[Dict[str, Any]]:
         with self._get_connection() as conn:
             row = conn.execute(
@@ -319,6 +430,46 @@ class SQLiteRepository(DatabaseRepositoryInterface):
                 "SELECT COUNT(*) as c FROM documents WHERE workspace_id = ?", (workspace_id,)
             ).fetchone()["c"]
             return res
+
+    def get_user_workspace(
+        self,
+        workspace_id: str,
+        user_id: str,
+    ) -> Optional[Dict[str, Any]]:
+
+        with self._get_connection() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM workspaces
+                WHERE workspace_id = ? AND user_id = ?
+                """,
+                (workspace_id, user_id),
+            ).fetchone()
+
+            if not row:
+                return None
+
+            result = dict(row)
+
+            result["session_count"] = conn.execute(
+                """
+                SELECT COUNT(*) AS c FROM research_sessions
+                WHERE workspace_id = ? AND user_id = ?
+                """,
+                (workspace_id, user_id),
+            ).fetchone()["c"]
+
+            result["document_count"] = conn.execute(
+                """
+                SELECT COUNT(*) AS c
+                FROM ai_documents
+                WHERE workspace_id = ?
+                AND user_id = ?
+                """,
+                (workspace_id, user_id),
+            ).fetchone()["c"]
+
+            return result
 
     def list_workspaces(self) -> List[Dict[str, Any]]:
         with self._get_connection() as conn:
@@ -336,6 +487,48 @@ class SQLiteRepository(DatabaseRepositoryInterface):
                 results.append(item)
             return results
 
+    def list_user_workspaces(
+        self,
+        user_id: str,
+    ) -> List[Dict[str, Any]]:
+
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM workspaces
+                WHERE user_id = ?
+                ORDER BY created_at DESC
+                """,
+                (user_id,),
+            ).fetchall()
+
+            results = []
+
+            for row in rows:
+                item = dict(row)
+                ws_id = item["workspace_id"]
+
+                item["session_count"] = conn.execute(
+                    """
+                    SELECT COUNT(*) AS c FROM research_sessions
+                    WHERE workspace_id = ? AND user_id = ?
+                    """,
+                    (ws_id, user_id),
+                ).fetchone()["c"]
+
+                item["document_count"] = conn.execute(
+                    """
+                    SELECT COUNT(*) AS c
+                    FROM ai_documents
+                    WHERE workspace_id = ?
+                    AND user_id = ?
+                    """,
+                    (ws_id, user_id),
+                ).fetchone()["c"]
+
+                results.append(item)
+
+            return results
     def create_session(
         self,
         workspace_id: str,
@@ -376,6 +569,54 @@ class SQLiteRepository(DatabaseRepositoryInterface):
             "document_ids": [],
         }
 
+    def create_user_session(
+            self,
+            workspace_id: str,
+            user_id: str,
+            title: str,
+            description: Optional[str] = None,
+        ) -> Dict[str, Any]:
+    
+            session_id = uuid4().hex
+            now = utc_now_iso()
+    
+            with self._get_connection() as conn:
+                workspace = conn.execute(
+                    """
+                    SELECT 1 FROM workspaces
+                    WHERE workspace_id = ? AND user_id = ?
+                    """,
+                    (workspace_id, user_id),
+                ).fetchone()
+    
+                if not workspace:
+                    raise ValueError("Workspace not found")
+    
+                conn.execute(
+                    """
+                    INSERT INTO research_sessions
+                    (session_id, workspace_id, user_id, title,
+                    description, status, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, 'ACTIVE', ?, ?)
+                    """,
+                    (
+                        session_id, workspace_id, user_id,
+                        title, description, now, now
+                    ),
+                )
+    
+            return {
+                "session_id": session_id,
+                "workspace_id": workspace_id,
+                "user_id": user_id,
+                "title": title,
+                "description": description,
+                "status": "ACTIVE",
+                "created_at": now,
+                "updated_at": now,
+                "document_ids": [],
+            }
+    
     def get_session(self, session_id: str) -> Optional[Dict[str, Any]]:
         with self._get_connection() as conn:
             row = conn.execute(
@@ -390,6 +631,94 @@ class SQLiteRepository(DatabaseRepositoryInterface):
             res["document_ids"] = [d["document_id"] for d in doc_rows]
             return res
 
+    def get_user_session(
+            self,
+            session_id: str,
+            user_id: str,
+        ) -> Optional[Dict[str, Any]]:
+    
+            with self._get_connection() as conn:
+                row = conn.execute(
+                    """
+                    SELECT s.*
+                    FROM research_sessions s
+                    JOIN workspaces w
+                        ON s.workspace_id = w.workspace_id
+                    WHERE s.session_id = ?
+                        AND s.user_id = ?
+                        AND w.user_id = ?
+                    """,
+                    (session_id, user_id, user_id),
+                ).fetchone()
+    
+                if not row:
+                    return None
+    
+                result = dict(row)
+    
+                doc_rows = conn.execute(
+                    """
+                    SELECT sd.document_id
+                    FROM session_documents sd
+                    JOIN ai_documents d
+                        ON sd.document_id = d.document_id
+                    WHERE sd.session_id = ?
+                        AND d.user_id = ?
+                    """,
+                    (session_id, user_id),
+                ).fetchall()
+    
+                result["document_ids"] = [
+                    d["document_id"] for d in doc_rows
+                ]
+                result["metadata"] = json.loads(
+                    result.get("metadata") or "{}"
+                )
+                return result
+
+    def update_user_session_metadata(
+        self,
+        session_id: str,
+        user_id: str,
+        metadata: dict
+    ) -> bool:
+
+        allowed_fields = {
+            "company",
+            "researchType",
+            "objective"
+        }
+
+        clean_metadata = {
+            key: value
+            for key, value in metadata.items()
+            if key in allowed_fields
+            and isinstance(value, str)
+        }
+
+        with self._get_connection() as conn:
+
+            cursor = conn.execute(
+                """
+                UPDATE research_sessions
+                SET metadata = ?
+                WHERE session_id = ?
+                AND user_id = ?
+                AND workspace_id IN (
+                    SELECT workspace_id
+                    FROM workspaces
+                    WHERE user_id = ?
+                )
+                """,
+                (
+                    json.dumps(clean_metadata),
+                    session_id,
+                    user_id,
+                    user_id
+                )
+            )
+
+            return cursor.rowcount == 1
     def list_sessions(self, workspace_id: Optional[str] = None) -> List[Dict[str, Any]]:
         with self._get_connection() as conn:
             if workspace_id:
@@ -413,6 +742,257 @@ class SQLiteRepository(DatabaseRepositoryInterface):
                 results.append(item)
             return results
 
+    def duplicate_user_session(
+        self,
+        session_id: str,
+        user_id: str
+    ):
+        import uuid
+
+        new_id = uuid.uuid4().hex
+
+        with self._get_connection() as conn:
+
+            conn.execute("BEGIN IMMEDIATE")
+
+            source = conn.execute(
+                """
+                SELECT s.*
+                FROM research_sessions s
+                JOIN workspaces w
+                    ON s.workspace_id = w.workspace_id
+                WHERE s.session_id = ?
+                AND s.user_id = ?
+                AND w.user_id = ?
+                """,
+                (session_id, user_id, user_id)
+            ).fetchone()
+
+            if not source:
+                return None
+
+            conn.execute(
+                """
+                INSERT INTO research_sessions (
+                    session_id,
+                    workspace_id,
+                    user_id,
+                    title,
+                    description,
+                    status,
+                    metadata,
+                    created_at,
+                    updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, 'ACTIVE', ?, ?, ?)
+                """,
+                (
+                    new_id,
+                    source["workspace_id"],
+                    user_id,
+                    source["title"][:248] + " (Copy)",
+                    source["description"],
+                    source["metadata"] or "{}",
+                    datetime.now(timezone.utc).isoformat(),
+                    datetime.now(timezone.utc).isoformat()
+                )
+            )
+
+            conn.execute(
+                """
+                INSERT INTO session_documents (
+                    session_id,
+                    document_id
+                )
+                SELECT ?, sd.document_id
+                FROM session_documents sd
+                JOIN ai_documents d
+                    ON sd.document_id = d.document_id
+                WHERE sd.session_id = ?
+                AND d.user_id = ?
+                AND d.workspace_id = ?
+                """,
+                (
+                    new_id,
+                    session_id,
+                    user_id,
+                    source["workspace_id"]
+                )
+            )
+
+        return self.get_user_session(new_id, user_id)
+    def list_user_sessions(
+            self,
+            workspace_id: str,
+            user_id: str,
+        ) -> List[Dict[str, Any]]:
+    
+            with self._get_connection() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT s.*
+                    FROM research_sessions s
+                    JOIN workspaces w
+                        ON s.workspace_id = w.workspace_id
+                    WHERE s.workspace_id = ?
+                        AND s.user_id = ?
+                        AND w.user_id = ?
+                    ORDER BY s.created_at DESC
+                    """,
+                    (workspace_id, user_id, user_id),
+                ).fetchall()
+    
+                results = []
+    
+                for row in rows:
+                    item = dict(row)
+    
+                    doc_rows = conn.execute(
+                        """
+                        SELECT sd.document_id
+                        FROM session_documents sd
+                        JOIN ai_documents d
+                            ON sd.document_id = d.document_id
+                        WHERE sd.session_id = ?
+                            AND d.user_id = ?
+                        """,
+                        (item["session_id"], user_id),
+                    ).fetchall()
+    
+                    item["document_ids"] = [
+                        d["document_id"] for d in doc_rows
+                    ]
+                    item["metadata"] = json.loads(
+                        item.get("metadata") or "{}"
+                    )
+                    results.append(item)
+    
+                return results
+
+    def update_user_session(
+        self,
+        session_id: str,
+        user_id: str,
+        title: str,
+        description: str = ""
+    ):
+        title = title.strip()
+
+        if not title:
+            raise ValueError("Session title is required.")
+
+        with self._get_connection() as conn:
+
+            conn.execute("BEGIN IMMEDIATE")
+
+            cursor = conn.execute(
+                """
+                UPDATE research_sessions
+                SET title = ?, description = ?
+                WHERE session_id = ?
+                AND user_id = ?
+                AND workspace_id IN (
+                    SELECT workspace_id
+                    FROM workspaces
+                    WHERE user_id = ?
+                )
+                """,
+                (
+                    title,
+                    description,
+                    session_id,
+                    user_id,
+                    user_id
+                )
+            )
+
+            if cursor.rowcount == 0:
+                return None
+
+        return self.get_user_session(session_id, user_id)
+
+    def delete_user_session(
+        self,
+        session_id: str,
+        user_id: str
+    ) -> bool:
+
+        with self._get_connection() as conn:
+
+            conn.execute("BEGIN IMMEDIATE")
+
+            session = conn.execute(
+                """
+                SELECT s.session_id
+                FROM research_sessions s
+                JOIN workspaces w
+                    ON s.workspace_id = w.workspace_id
+                WHERE s.session_id = ?
+                AND s.user_id = ?
+                AND w.user_id = ?
+                """,
+                (session_id, user_id, user_id)
+            ).fetchone()
+
+            if not session:
+                return False
+
+            running = conn.execute(
+                """
+                SELECT 1 FROM ai_processing_jobs
+                WHERE session_id = ?
+                AND status IN ('PROCESSING', 'RUNNING')
+                LIMIT 1
+                """,
+                (session_id,)
+            ).fetchone()
+
+            if running:
+                raise ValueError(
+                    "Cannot delete a session while processing."
+                )
+            conn.execute(
+                """
+                UPDATE ai_processing_jobs
+                SET status = 'CANCELLED',
+                    current_stage = 'SESSION_DELETED',
+                    updated_at = ?
+                WHERE session_id = ?
+                AND status IN ('QUEUED', 'PENDING')
+                """,
+                (utc_now_iso(), session_id)
+            )
+            conn.execute(
+                "DELETE FROM ai_research_messages WHERE session_id = ?",
+                (session_id,)
+            )
+
+            conn.execute(
+                "DELETE FROM session_documents WHERE session_id = ?",
+                (session_id,)
+            )
+
+            for table in [
+                "ai_documents",
+                "ai_processing_jobs",
+                "ai_red_flag_findings",
+                "ai_agent_runs"
+            ]:
+                conn.execute(
+                    f"UPDATE {table} SET session_id = NULL WHERE session_id = ?",
+                    (session_id,)
+                )
+
+            conn.execute(
+                """
+                DELETE FROM research_sessions
+                WHERE session_id = ? AND user_id = ?
+                """,
+                (session_id, user_id)
+            )
+
+            return True
+            
     def add_document_to_session(self, session_id: str, document_id: str) -> bool:
         now = utc_now_iso()
         with self._get_connection() as conn:
@@ -461,14 +1041,71 @@ class SQLiteRepository(DatabaseRepositoryInterface):
 
         with self._get_connection() as conn:
             # 1. Clean up any stale records with the same sha256 under a different document_id
-            conn.execute(
-                "DELETE FROM ai_documents WHERE sha256 = ? AND document_id != ?",
-                (doc_data["sha256"], document_id),
-            )
-            conn.execute(
-                "DELETE FROM documents WHERE sha256 = ? AND document_id != ?",
-                (doc_data["sha256"], document_id),
-            )
+            if not user_id:
+                raise ValueError("Document owner is required")
+
+            conn.execute("BEGIN IMMEDIATE")
+
+            workspace = conn.execute(
+                """
+                SELECT 1 FROM workspaces
+                WHERE workspace_id = ? AND user_id = ?
+                """,
+                (workspace_id, user_id)
+            ).fetchone()
+
+            if not workspace:
+                raise ValueError("Workspace not found")
+
+            if session_id:
+                session = conn.execute(
+                    """
+                    SELECT 1 FROM research_sessions
+                    WHERE session_id = ?
+                    AND workspace_id = ?
+                    AND user_id = ?
+                    """,
+                    (session_id, workspace_id, user_id)
+                ).fetchone()
+
+                if not session:
+                    raise ValueError("Session not found")
+
+            existing_owner = conn.execute(
+                """
+                SELECT user_id, workspace_id FROM ai_documents
+                WHERE document_id = ?
+                """,
+                (document_id,)
+            ).fetchone()
+
+            if existing_owner and (
+                existing_owner["user_id"] != user_id
+                or existing_owner["workspace_id"] != workspace_id
+            ):
+                raise ValueError("Document ownership conflict")
+
+            legacy = conn.execute(
+                """
+                SELECT 1 FROM documents
+                WHERE document_id = ?
+                """,
+                (document_id,)
+            ).fetchone()
+
+            if legacy and not existing_owner:
+                raise ValueError("Legacy document ownership conflict")
+
+            duplicate = conn.execute(
+                """
+                SELECT document_id FROM ai_documents
+                WHERE sha256 = ? AND user_id = ?
+                """,
+                (doc_data["sha256"], user_id)
+            ).fetchone()
+
+            if duplicate and duplicate["document_id"] != document_id:
+                raise ValueError("Document already exists for this user")
 
             # 2. Check if this document_id already exists in ai_documents (e.g. created as a job placeholder)
             existing_ai = conn.execute(
@@ -613,6 +1250,39 @@ class SQLiteRepository(DatabaseRepositoryInterface):
                 res["metadata"] = {}
             return res
 
+    def get_user_document_by_sha256(
+            self,
+            sha256_hash: str,
+            user_id: str,
+        ) -> Optional[Dict[str, Any]]:
+    
+            with self._get_connection() as conn:
+                row = conn.execute(
+                    """
+                    SELECT d.*
+                    FROM ai_documents d
+                    JOIN workspaces w
+                        ON d.workspace_id = w.workspace_id
+                    WHERE d.sha256 = ?
+                        AND d.user_id = ?
+                        AND w.user_id = ?
+                    """,
+                    (sha256_hash, user_id, user_id),
+                ).fetchone()
+    
+                if not row:
+                    return None
+    
+                result = dict(row)
+    
+                try:
+                    result["metadata"] = json.loads(
+                        result.get("metadata") or "{}"
+                    )
+                except Exception:
+                    result["metadata"] = {}
+    
+                return result
     def get_document_by_id(self, document_id: str) -> Optional[Dict[str, Any]]:
         with self._get_connection() as conn:
             row = conn.execute(
@@ -630,7 +1300,84 @@ class SQLiteRepository(DatabaseRepositoryInterface):
             except Exception:
                 res["metadata"] = {}
             return res
+    def get_user_document(
+        self,
+        document_id: str,
+        user_id: str,
+    ) -> Optional[Dict[str, Any]]:
 
+        with self._get_connection() as conn:
+            row = conn.execute(
+                """
+                SELECT d.*
+                FROM ai_documents d
+                JOIN workspaces w
+                    ON d.workspace_id = w.workspace_id
+                WHERE d.document_id = ?
+                    AND d.user_id = ?
+                    AND w.user_id = ?
+                """,
+                (document_id, user_id, user_id),
+            ).fetchone()
+
+            if not row:
+                return None
+
+            result = dict(row)
+
+            try:
+                result["metadata"] = json.loads(
+                    result.get("metadata") or "{}"
+                )
+            except Exception:
+                result["metadata"] = {}
+
+            return result
+
+    def delete_user_document(
+        self,
+        document_id: str,
+        user_id: str
+    ) -> bool:
+
+        with self._get_connection() as conn:
+
+            conn.execute("BEGIN IMMEDIATE")
+
+            document = conn.execute(
+                """
+                SELECT d.document_id
+                FROM ai_documents d
+                JOIN workspaces w
+                    ON d.workspace_id = w.workspace_id
+                WHERE d.document_id = ?
+                AND d.user_id = ?
+                AND w.user_id = ?
+                """,
+                (document_id, user_id, user_id)
+            ).fetchone()
+
+            if not document:
+                return False
+
+            tables = [
+                "session_documents",
+                "ai_metric_evidence",
+                "ai_financial_metrics",
+                "ai_red_flag_findings",
+                "ai_agent_runs",
+                "ai_processing_jobs",
+                "documents",
+                "ai_documents"
+            ]
+
+            for table in tables:
+                conn.execute(
+                    f"DELETE FROM {table} WHERE document_id = ?",
+                    (document_id,)
+                )
+
+            return True
     def delete_document(self, document_id: str) -> bool:
         with self._get_connection() as conn:
             conn.execute("DELETE FROM ai_documents WHERE document_id = ?", (document_id,))
@@ -719,6 +1466,47 @@ class SQLiteRepository(DatabaseRepositoryInterface):
                 results.append(item)
             return results
 
+    def list_user_documents(
+        self,
+        user_id: str,
+        workspace_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+
+        query = """
+            SELECT d.*
+            FROM ai_documents d
+            JOIN workspaces w
+                ON d.workspace_id = w.workspace_id
+            WHERE d.user_id = ?
+                AND w.user_id = ?
+        """
+
+        params = [user_id, user_id]
+
+        if workspace_id:
+            query += " AND d.workspace_id = ?"
+            params.append(workspace_id)
+
+        query += " ORDER BY d.created_at DESC"
+
+        with self._get_connection() as conn:
+            rows = conn.execute(query, params).fetchall()
+
+            results = []
+
+            for row in rows:
+                item = dict(row)
+
+                try:
+                    item["metadata"] = json.loads(
+                        item.get("metadata") or "{}"
+                    )
+                except Exception:
+                    item["metadata"] = {}
+
+                results.append(item)
+
+            return results
     # =========================================================================
     # Milestone 2: Processing Jobs
     # =========================================================================
@@ -1592,6 +2380,7 @@ class SupabasePostgresRepository(DatabaseRepositoryInterface):
                 logger.warning("Postgres error in create_session: %s", e)
         return self._fallback_repo.create_session(workspace_id, title, description, session_id)
 
+    
     def get_session(self, session_id: str) -> Optional[Dict[str, Any]]:
         if self._is_connected and self._engine:
             try:
@@ -1613,6 +2402,7 @@ class SupabasePostgresRepository(DatabaseRepositoryInterface):
                 logger.debug("Postgres error in get_session: %s", e)
         return self._fallback_repo.get_session(session_id)
 
+    
     def list_sessions(self, workspace_id: Optional[str] = None) -> List[Dict[str, Any]]:
         if self._is_connected and self._engine:
             try:
@@ -1640,6 +2430,7 @@ class SupabasePostgresRepository(DatabaseRepositoryInterface):
                 logger.debug("Postgres error in list_sessions: %s", e)
         return self._fallback_repo.list_sessions(workspace_id)
 
+    
     def add_document_to_session(self, session_id: str, document_id: str) -> bool:
         if self._is_connected and self._engine:
             try:
@@ -1755,6 +2546,7 @@ class SupabasePostgresRepository(DatabaseRepositoryInterface):
                 logger.debug("Postgres error in get_document_by_sha256: %s", e)
         return self._fallback_repo.get_document_by_sha256(sha256_hash)
 
+    
     def get_document_by_id(self, document_id: str) -> Optional[Dict[str, Any]]:
         if self._is_connected and self._engine:
             try:

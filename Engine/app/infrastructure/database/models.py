@@ -167,7 +167,7 @@ CREATE TABLE IF NOT EXISTS ai_documents (
     workspace_id TEXT,
     session_id TEXT,
     user_id TEXT,
-    sha256 TEXT NOT NULL UNIQUE,
+    sha256 TEXT NOT NULL,
     filename TEXT NOT NULL,
     stored_filename TEXT NOT NULL,
     storage_path TEXT NOT NULL,
@@ -267,16 +267,19 @@ CREATE TABLE IF NOT EXISTS ai_research_messages (
 
 -- Legacy development tables
 CREATE TABLE IF NOT EXISTS workspaces (
-    workspace_id TEXT PRIMARY KEY,
+      workspace_id TEXT PRIMARY KEY,
+    user_id TEXT,
+
     name TEXT NOT NULL,
-    description TEXT,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
+      description TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+  );
 
 CREATE TABLE IF NOT EXISTS research_sessions (
     session_id TEXT PRIMARY KEY,
     workspace_id TEXT,
+    user_id TEXT,
     title TEXT NOT NULL,
     description TEXT,
     status TEXT DEFAULT 'ACTIVE',
@@ -284,11 +287,10 @@ CREATE TABLE IF NOT EXISTS research_sessions (
     updated_at TEXT NOT NULL,
     FOREIGN KEY(workspace_id) REFERENCES workspaces(workspace_id) ON DELETE CASCADE
 );
-
 CREATE TABLE IF NOT EXISTS documents (
     document_id TEXT PRIMARY KEY,
     workspace_id TEXT,
-    sha256 TEXT NOT NULL UNIQUE,
+    sha256 TEXT NOT NULL,
     filename TEXT NOT NULL,
     stored_filename TEXT NOT NULL,
     storage_path TEXT NOT NULL,
@@ -310,4 +312,7 @@ CREATE TABLE IF NOT EXISTS session_documents (
     FOREIGN KEY(session_id) REFERENCES research_sessions(session_id) ON DELETE CASCADE,
     FOREIGN KEY(document_id) REFERENCES documents(document_id) ON DELETE CASCADE
 );
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_documents_user_sha256
+ON ai_documents(user_id, sha256);
+
 """

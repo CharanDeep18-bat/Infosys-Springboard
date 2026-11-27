@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from typing import List, Optional, Union
 from pydantic import BaseModel, Field
 
-
+from typing import Dict
 class WorkspaceBase(BaseModel):
     name: str = Field(..., min_length=1, max_length=255, description="Workspace display name")
     description: Optional[str] = Field(default=None, description="Optional workspace description")
@@ -25,7 +25,7 @@ class WorkspaceResponse(WorkspaceBase):
 class ResearchSessionBase(BaseModel):
     title: str = Field(..., min_length=1, max_length=255, description="Session title")
     description: Optional[str] = Field(default=None, description="Detailed session description")
-
+    metadata: Dict[str, str] = Field(default_factory=dict)
 
 class ResearchSessionCreate(ResearchSessionBase):
     pass

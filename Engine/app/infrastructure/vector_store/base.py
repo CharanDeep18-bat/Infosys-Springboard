@@ -2,8 +2,57 @@
 
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
+def validate_search_filters(filters):
+    if not isinstance(filters, dict):
+        raise ValueError("Ownership filters are required.")
 
+    for field in ("user_id", "workspace_id", "document_id"):
+        value = filters.get(field)
 
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"Valid {field} is required.")
+
+    allowed = {
+        "user_id",
+        "workspace_id",
+        "document_id",
+        "is_table"
+    }
+
+    if set(filters) - allowed:
+        raise ValueError("Unsupported vector search filter.")
+
+    if (
+        filters.get("is_table") is not None
+        and not isinstance(filters["is_table"], bool)
+    ):
+        raise ValueError("is_table must be a boolean.")
+
+    return dict(filters)
+def validate_chunk_ownership(chunks: List[Dict[str, Any]]) -> None:
+    required_fields = (
+        "chunk_id",
+        "document_id",
+        "user_id",
+        "workspace_id"
+    )
+
+    for chunk in chunks:
+        for field in required_fields:
+            value = chunk.get(field)
+
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(
+                    f"Chunk ownership validation failed: "
+                    f"Missing or invalid {field}"
+                )
+
+        if not chunk["chunk_id"].startswith(
+            chunk["document_id"] + "-"
+        ):
+            raise ValueError(
+                "Chunk ID does not match document ID"
+            )
 class VectorStoreInterface(ABC):
     """Abstract interface for vector database operations."""
 
@@ -36,7 +85,12 @@ class VectorStoreInterface(ABC):
         """Verify vector database connectivity and collection health."""
         pass
 
-    def get_chunks_by_document(self, document_id: str) -> List[Dict[str, Any]]:
-        """Retrieve all chunks belonging to a document. Subclasses can override."""
-        return []
+    def get_chunks_by_document(
+        self,
+        document_id: str,
+        *,
+        user_id: str,
+        workspace_id: str
+    ) -> List[Dict[str, Any]]:
+        raise NotImplementedError
 

@@ -7,8 +7,10 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 from app.config import get_settings
-from app.infrastructure.vector_store.base import VectorStoreInterface
-
+from app.infrastructure.vector_store.base import (
+    VectorStoreInterface,
+    validate_chunk_ownership
+)
 logger = logging.getLogger(__name__)
 
 
@@ -87,6 +89,7 @@ class QdrantVectorStore(VectorStoreInterface):
         chunks: List[Dict[str, Any]],
         embeddings: List[List[float]],
     ) -> int:
+        validate_chunk_ownership(chunks)
         if len(chunks) != len(embeddings):
             raise ValueError("Each chunk must correspond to exactly one embedding vector.")
         if not chunks:
@@ -101,6 +104,8 @@ class QdrantVectorStore(VectorStoreInterface):
                 "payload": {
                     "chunk_id": str(chunk["chunk_id"]),
                     "document_id": str(chunk["document_id"]),
+                    "user_id": chunk["user_id"],
+                    "workspace_id": chunk["workspace_id"],
                     "filename": str(chunk.get("filename", "")),
                     "page_number": int(chunk.get("page_number", 1)),
                     "page_chunk_index": int(chunk.get("page_chunk_index", 1)),
@@ -124,66 +129,75 @@ class QdrantVectorStore(VectorStoreInterface):
 
         return len(points)
 
+    # def search_chunks(
+    #     self,
+    #     query_embedding: List[float],
+    #     top_k: int = 5,
+    #     filters: Optional[Dict[str, Any]] = None,
+    # ) -> List[Dict[str, Any]]:
+    #     query_payload: Dict[str, Any] = {
+    #         "vector": query_embedding,
+    #         "limit": top_k,
+    #         "with_payload": True,
+    #     }
+
+    #     # Construct Qdrant filter condition if provided
+    #     if filters:
+    #         must_clauses = []
+    #         if "document_id" in filters and filters["document_id"]:
+    #             must_clauses.append({
+    #                 "key": "document_id",
+    #                 "match": {"value": str(filters["document_id"])},
+    #             })
+    #         if "is_table" in filters and filters["is_table"] is not None:
+    #             must_clauses.append({
+    #                 "key": "is_table",
+    #                 "match": {"value": bool(filters["is_table"])},
+    #             })
+    #         if must_clauses:
+    #             query_payload["filter"] = {"must": must_clauses}
+
+    #     with httpx.Client(timeout=10.0) as client:
+    #         res = client.post(
+    #             f"{self.url}/collections/{self.collection_name}/points/search",
+    #             headers=self.headers,
+    #             json=query_payload,
+    #         )
+    #         if res.status_code != 200:
+    #             raise RuntimeError(f"Qdrant search error ({res.status_code}): {res.text}")
+
+    #         hits = res.json().get("result", [])
+    #         matches = []
+    #         for hit in hits:
+    #             payload = hit.get("payload", {})
+    #             score = hit.get("score", 0.0)
+    #             # Convert cosine similarity score to distance metric (1.0 - score)
+    #             distance = round(1.0 - score, 4)
+    #             matches.append({
+    #                 "chunk_id": payload.get("chunk_id", str(hit.get("id"))),
+    #                 "text": payload.get("text", ""),
+    #                 "metadata": {
+    #                     "document_id": payload.get("document_id"),
+    #                     "filename": payload.get("filename"),
+    #                     "page_number": payload.get("page_number"),
+    #                     "page_chunk_index": payload.get("page_chunk_index"),
+    #                     "section": payload.get("section"),
+    #                     "is_table": payload.get("is_table"),
+    #                 },
+    #                 "distance": distance,
+    #                 "score": score,
+    #             })
+    #         return matches
     def search_chunks(
         self,
         query_embedding: List[float],
         top_k: int = 5,
-        filters: Optional[Dict[str, Any]] = None,
+        filters: Optional[Dict[str, Any]] = None
     ) -> List[Dict[str, Any]]:
-        query_payload: Dict[str, Any] = {
-            "vector": query_embedding,
-            "limit": top_k,
-            "with_payload": True,
-        }
 
-        # Construct Qdrant filter condition if provided
-        if filters:
-            must_clauses = []
-            if "document_id" in filters and filters["document_id"]:
-                must_clauses.append({
-                    "key": "document_id",
-                    "match": {"value": str(filters["document_id"])},
-                })
-            if "is_table" in filters and filters["is_table"] is not None:
-                must_clauses.append({
-                    "key": "is_table",
-                    "match": {"value": bool(filters["is_table"])},
-                })
-            if must_clauses:
-                query_payload["filter"] = {"must": must_clauses}
-
-        with httpx.Client(timeout=10.0) as client:
-            res = client.post(
-                f"{self.url}/collections/{self.collection_name}/points/search",
-                headers=self.headers,
-                json=query_payload,
-            )
-            if res.status_code != 200:
-                raise RuntimeError(f"Qdrant search error ({res.status_code}): {res.text}")
-
-            hits = res.json().get("result", [])
-            matches = []
-            for hit in hits:
-                payload = hit.get("payload", {})
-                score = hit.get("score", 0.0)
-                # Convert cosine similarity score to distance metric (1.0 - score)
-                distance = round(1.0 - score, 4)
-                matches.append({
-                    "chunk_id": payload.get("chunk_id", str(hit.get("id"))),
-                    "text": payload.get("text", ""),
-                    "metadata": {
-                        "document_id": payload.get("document_id"),
-                        "filename": payload.get("filename"),
-                        "page_number": payload.get("page_number"),
-                        "page_chunk_index": payload.get("page_chunk_index"),
-                        "section": payload.get("section"),
-                        "is_table": payload.get("is_table"),
-                    },
-                    "distance": distance,
-                    "score": score,
-                })
-            return matches
-
+        raise RuntimeError(
+            "Qdrant retrieval is disabled pending ownership isolation."
+        )
     def count_chunks(self) -> int:
         try:
             with httpx.Client(timeout=5.0) as client:
@@ -198,67 +212,78 @@ class QdrantVectorStore(VectorStoreInterface):
             pass
         return 0
 
-    def get_chunks_by_document(self, document_id: str) -> List[Dict[str, Any]]:
-        """Retrieve all indexed chunks for a document via Qdrant scroll API without dummy embeddings."""
-        chunks: List[Dict[str, Any]] = []
-        offset = None
-        filter_payload = {
-            "must": [
-                {
-                    "key": "document_id",
-                    "match": {"value": str(document_id)},
-                }
-            ]
-        }
+    # def get_chunks_by_document(self, document_id: str) -> List[Dict[str, Any]]:
+    #     """Retrieve all indexed chunks for a document via Qdrant scroll API without dummy embeddings."""
+    #     chunks: List[Dict[str, Any]] = []
+    #     offset = None
+    #     filter_payload = {
+    #         "must": [
+    #             {
+    #                 "key": "document_id",
+    #                 "match": {"value": str(document_id)},
+    #             }
+    #         ]
+    #     }
 
-        try:
-            with httpx.Client(timeout=15.0) as client:
-                while True:
-                    body: Dict[str, Any] = {
-                        "filter": filter_payload,
-                        "limit": 100,
-                        "with_payload": True,
-                        "with_vector": False,
-                    }
-                    if offset is not None:
-                        body["offset"] = offset
+    #     try:
+    #         with httpx.Client(timeout=15.0) as client:
+    #             while True:
+    #                 body: Dict[str, Any] = {
+    #                     "filter": filter_payload,
+    #                     "limit": 100,
+    #                     "with_payload": True,
+    #                     "with_vector": False,
+    #                 }
+    #                 if offset is not None:
+    #                     body["offset"] = offset
 
-                    res = client.post(
-                        f"{self.url}/collections/{self.collection_name}/points/scroll",
-                        headers=self.headers,
-                        json=body,
-                    )
-                    if res.status_code != 200:
-                        logger.warning("Qdrant scroll error (%d): %s", res.status_code, res.text)
-                        break
+    #                 res = client.post(
+    #                     f"{self.url}/collections/{self.collection_name}/points/scroll",
+    #                     headers=self.headers,
+    #                     json=body,
+    #                 )
+    #                 if res.status_code != 200:
+    #                     logger.warning("Qdrant scroll error (%d): %s", res.status_code, res.text)
+    #                     break
 
-                    data = res.json().get("result", {})
-                    points = data.get("points", [])
-                    for p in points:
-                        payload = p.get("payload", {})
-                        chunks.append({
-                            "chunk_id": payload.get("chunk_id", str(p.get("id"))),
-                            "document_id": payload.get("document_id"),
-                            "text": payload.get("text", ""),
-                            "page_number": payload.get("page_number", 1),
-                            "page_chunk_index": payload.get("page_chunk_index", 1),
-                            "section": payload.get("section", ""),
-                            "is_table": payload.get("is_table", False),
-                            "filename": payload.get("filename", ""),
-                            "metadata": {
-                                "document_id": payload.get("document_id"),
-                                "filename": payload.get("filename"),
-                                "page_number": payload.get("page_number"),
-                                "page_chunk_index": payload.get("page_chunk_index"),
-                                "section": payload.get("section"),
-                                "is_table": payload.get("is_table"),
-                            },
-                        })
+    #                 data = res.json().get("result", {})
+    #                 points = data.get("points", [])
+    #                 for p in points:
+    #                     payload = p.get("payload", {})
+    #                     chunks.append({
+    #                         "chunk_id": payload.get("chunk_id", str(p.get("id"))),
+    #                         "document_id": payload.get("document_id"),
+    #                         "text": payload.get("text", ""),
+    #                         "page_number": payload.get("page_number", 1),
+    #                         "page_chunk_index": payload.get("page_chunk_index", 1),
+    #                         "section": payload.get("section", ""),
+    #                         "is_table": payload.get("is_table", False),
+    #                         "filename": payload.get("filename", ""),
+    #                         "metadata": {
+    #                             "document_id": payload.get("document_id"),
+    #                             "filename": payload.get("filename"),
+    #                             "page_number": payload.get("page_number"),
+    #                             "page_chunk_index": payload.get("page_chunk_index"),
+    #                             "section": payload.get("section"),
+    #                             "is_table": payload.get("is_table"),
+    #                         },
+    #                     })
 
-                    offset = data.get("next_page_offset")
-                    if not offset:
-                        break
-        except Exception as exc:
-            logger.warning("Error fetching chunks by document %s from Qdrant: %s", document_id, exc)
+    #                 offset = data.get("next_page_offset")
+    #                 if not offset:
+    #                     break
+    #     except Exception as exc:
+    #         logger.warning("Error fetching chunks by document %s from Qdrant: %s", document_id, exc)
 
-        return chunks
+    #     return chunks
+    def get_chunks_by_document(
+        self,
+        document_id: str,
+        *,
+        user_id: str,
+        workspace_id: str
+    ) -> List[Dict[str, Any]]:
+
+        raise RuntimeError(
+            "Qdrant retrieval is disabled pending ownership isolation."
+        )

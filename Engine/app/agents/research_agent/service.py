@@ -172,12 +172,18 @@ class ResearchAgentService:
         document_ids: Optional[List[str]] = None,
         session_id: Optional[str] = None,
         top_k: int = 6,
+        *,
+        user_id: str,
     ) -> ResearchAnswerResponse:
         clean_question = (question or "").strip()
         if not clean_question:
             raise ValueError("Research question must not be empty.")
 
-        documents = self._resolve_documents(document_ids=document_ids, session_id=session_id)
+        documents = self._resolve_documents(
+            document_ids=document_ids,
+            session_id=session_id,
+            user_id=user_id
+        )   
         if not documents:
             raise ValueError(
                 "No indexed documents are available for research. Upload or ingest a financial document first."
@@ -239,35 +245,61 @@ class ResearchAgentService:
         self,
         document_ids: Optional[List[str]],
         session_id: Optional[str],
+        *,
+        user_id: str
     ) -> List[Dict[str, Any]]:
-        if document_ids:
-            docs = []
-            missing = []
-            for doc_id in document_ids:
-                doc = self.repo.get_document_by_id(doc_id)
-                if not doc:
-                    missing.append(doc_id)
-                else:
-                    docs.append(doc)
-            if missing:
-                raise ValueError(f"Document(s) not found: {', '.join(missing)}")
-            return docs
+
+        if not user_id:
+            raise ValueError("User authentication is required.")
+
+        session = None
 
         if session_id:
-            session = self.repo.get_session(session_id)
+            session = self.repo.get_user_session(
+                session_id, user_id
+            )
+
             if not session:
-                raise ValueError(f"Research session '{session_id}' not found.")
-            session_doc_ids = self.repo.get_session_documents(session_id)
-            docs = [d for d in (self.repo.get_document_by_id(i) for i in session_doc_ids) if d]
-            if docs:
-                return docs
-            return [
-                d for d in self.repo.list_documents(workspace_id=session.get("workspace_id"))
-                if d.get("indexed")
-            ]
+                raise ValueError("Research session not found.")
 
-        return [d for d in self.repo.list_documents() if d.get("indexed")]
+        if document_ids is None:
 
+            if session:
+                document_ids = session.get("document_ids") or []
+
+            else:
+                documents = self.repo.list_user_documents(
+                    user_id=user_id
+                )
+
+                document_ids = [
+                    d["document_id"]
+                    for d in documents
+                    if d.get("indexed")
+                ]
+
+        documents = []
+
+        for doc_id in dict.fromkeys(document_ids):
+
+            doc = self.repo.get_user_document(
+                doc_id, user_id
+            )
+
+            if not doc:
+                raise ValueError("Document not found.")
+
+            if session:
+                if doc["workspace_id"] != session["workspace_id"]:
+                    raise ValueError("Document not found in workspace.")
+
+                if doc_id not in (session.get("document_ids") or []):
+                    raise ValueError("Document not found in session.")
+
+            if doc.get("indexed"):
+                documents.append(doc)
+
+        return documents
     def _decompose_question(self, question: str) -> List[str]:
         raw_parts = re.split(r"\?|\n|;|,\s*(?:and|also)\s+|\s+and\s+|\s+plus\s+|\s+also\s+", question)
         parts: List[str] = []
@@ -295,33 +327,63 @@ class ResearchAgentService:
         sub_questions: List[str],
         document_id: str,
         top_k: int,
+        *,
+        user_id: str,
+        workspace_id: str
     ) -> List[Dict[str, Any]]:
-        results: List[Dict[str, Any]] = []
+
+        results = []
+
+        filters = {
+            "document_id": document_id,
+            "user_id": user_id,
+            "workspace_id": workspace_id
+        }
+
         for sub_question in sub_questions:
+
             try:
-                embedding = generate_embeddings([sub_question])[0]
+                embedding = generate_embeddings(
+                    [sub_question]
+                )[0]
+
                 matches = self.vector_store.search_chunks(
                     query_embedding=embedding,
                     top_k=top_k,
-                    filters={"document_id": document_id},
+                    filters=filters
                 )
+
             except Exception as exc:
-                logger.warning("Retrieval failed for document %s: %s", document_id, exc)
+                logger.warning(
+                    "Retrieval failed for document %s: %s",
+                    document_id,
+                    exc
+                )
                 continue
 
             for match in matches:
+
                 metadata = match.get("metadata") or {}
+
+                if any(
+                    metadata.get(key) != value
+                    for key, value in filters.items()
+                ):
+                    continue
+
                 results.append({
                     "chunk_id": match.get("chunk_id"),
                     "text": match.get("text", ""),
-                    "page_number": int(metadata.get("page_number") or 1),
+                    "page_number": int(
+                        metadata.get("page_number") or 1
+                    ),
                     "section": metadata.get("section") or "",
                     "filename": metadata.get("filename") or "",
-                    "document_id": metadata.get("document_id") or document_id,
-                    "score": match.get("score"),
+                    "document_id": document_id,
+                    "score": match.get("score")
                 })
-        return results
 
+        return results
     # ------------------------------------------------------------------
     # Answer synthesis
     # ------------------------------------------------------------------
@@ -468,7 +530,13 @@ class ResearchAgentService:
                     )
 
             # Narrative evidence from retrieval.
-            chunks = self._retrieve_chunks(sub_questions, doc_id, top_k)
+            chunks = self._retrieve_chunks(
+                sub_questions,
+                doc_id,
+                top_k,
+                user_id=doc["user_id"],
+                workspace_id=doc["workspace_id"]
+            )
             retrieval_count += len(chunks)
             seen_chunks: set = set()
             for chunk in chunks:

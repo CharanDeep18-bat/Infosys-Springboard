@@ -22,7 +22,6 @@ import {
   saveStoredChatHistory,
   clearStoredChatHistory
 } from "../data/researchChatData";
-import { INITIAL_DOCUMENTS, getStoredDocuments } from "../data/documentData";
 import api from "../services/api";
 
 function mapCitation(citation, index = 0) {
@@ -126,7 +125,7 @@ export default function ConversationalResearch({
     if (Array.isArray(initialDocumentsProp)) {
       return initialDocumentsProp;
     }
-    return getStoredDocuments();
+    return [];
   });
 
   // Sync availableDocs if parent documents update

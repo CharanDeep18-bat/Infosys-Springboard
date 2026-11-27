@@ -16,8 +16,7 @@ import {
 } from "lucide-react";
 import { AVAILABLE_REPORT_SECTIONS } from "../../data/reportData";
 import { SEED_COMPANIES } from "../../data/seedData";
-import { INITIAL_DOCUMENTS } from "../../data/documentData";
-
+import { api } from "../../services/api";
 export default function ReportConfigModal({
   open,
   onClose,
@@ -26,7 +25,6 @@ export default function ReportConfigModal({
   onGenerateReport,
   onSaveDraft
 }) {
-  if (!open) return null;
 
   // Selected session
   const defaultSession = activeSession || sessions[0];
@@ -44,19 +42,49 @@ export default function ReportConfigModal({
     return `FY24 Institutional Research Dossier: ${primaryName}`;
   });
 
-  // Available documents for selected session
-  const [availableDocs, setAvailableDocs] = useState(() => {
-    return INITIAL_DOCUMENTS.filter((d) => {
-      if (!currentSession?.companyIds) return true;
-      return currentSession.companyIds.includes(d.ticker);
-    });
-  });
+  const [availableDocs, setAvailableDocs] = useState([]);
+  const [selectedDocIds, setSelectedDocIds] = useState([]);
 
-  // Selected document IDs
-  const [selectedDocIds, setSelectedDocIds] = useState(() =>
-    availableDocs.map((d) => d.id)
-  );
+  useEffect(() => {
+    if (!open) return;
 
+    let cancelled = false;
+
+    setAvailableDocs([]);
+    setSelectedDocIds([]);
+
+    async function loadDocuments() {
+      try {
+        const docs = await api.listDocuments();
+
+        const sessionDocIds = new Set(
+          (currentSession?.documents || []).map(
+            (doc) => typeof doc === "string" ? doc : doc.id
+          )
+        );
+
+        const filtered = currentSession
+          ? docs.filter((doc) => sessionDocIds.has(doc.id))
+          : docs;
+
+        if (!cancelled) {
+          setAvailableDocs(filtered);
+          setSelectedDocIds(filtered.map((doc) => doc.id));
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setAvailableDocs([]);
+          setSelectedDocIds([]);
+        }
+      }
+    }
+
+    loadDocuments();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [open, currentSession?.id]);
   // Selected sections (IDs)
   const [selectedSectionIds, setSelectedSectionIds] = useState([
     "executive_summary",
@@ -78,9 +106,8 @@ export default function ReportConfigModal({
       const cids = ses.companyIds || ["INFY"];
       setSelectedCompanyIds(cids);
 
-      const docs = INITIAL_DOCUMENTS.filter((d) => cids.includes(d.ticker));
-      setAvailableDocs(docs.length > 0 ? docs : INITIAL_DOCUMENTS.slice(0, 3));
-      setSelectedDocIds(docs.map((d) => d.id));
+      setAvailableDocs([]);
+      setSelectedDocIds([]);
 
       const primary = SEED_COMPANIES[cids[0]]?.name || "Target Entity";
       setReportTitle(
@@ -93,14 +120,11 @@ export default function ReportConfigModal({
 
   // Toggle company
   function handleToggleCompany(cid) {
-    setSelectedCompanyIds((prev) => {
-      const next = prev.includes(cid) ? prev.filter((id) => id !== cid) : [...prev, cid];
-      // Update docs
-      const relevantDocs = INITIAL_DOCUMENTS.filter((d) => next.includes(d.ticker));
-      setAvailableDocs(relevantDocs.length > 0 ? relevantDocs : INITIAL_DOCUMENTS.slice(0, 3));
-      setSelectedDocIds(relevantDocs.map((d) => d.id));
-      return next;
-    });
+    setSelectedCompanyIds((prev) =>
+      prev.includes(cid)
+        ? prev.filter((id) => id !== cid)
+        : [...prev, cid]
+    );
   }
 
   // Toggle document
@@ -128,6 +152,9 @@ export default function ReportConfigModal({
   // Validation
   function validateForm() {
     const errs = {};
+    if (selectedDocIds.length === 0) {
+      errs.documents = "Please select at least one uploaded document.";
+    }
     if (!reportTitle.trim()) {
       errs.title = "Report title is required.";
     }
@@ -161,6 +188,7 @@ export default function ReportConfigModal({
       title: reportTitle.trim(),
       company: companyLabel,
       companyIds: selectedCompanyIds,
+      documentIds: selectedDocObjects.map((d) => d.id),
       sessionId: currentSession?.id || "session-custom",
       sessionTitle: currentSession?.title || "Financial Analysis Session",
       status: status, // "Generating" | "Draft"
@@ -176,6 +204,9 @@ export default function ReportConfigModal({
       onClose();
     }, 400);
   }
+
+  if (!open) return null;
+
 
   return (
     <div className="fin-modal-overlay" onClick={onClose} role="dialog" aria-modal="true">

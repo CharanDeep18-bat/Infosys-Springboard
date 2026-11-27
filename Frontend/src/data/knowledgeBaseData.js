@@ -407,24 +407,8 @@ export const SAMPLE_QUERIES = [
 const KB_STORAGE_KEY = "finresearch_kb_records_v3";
 
 export function getStoredIndexingRecords() {
-  try {
-    const raw = localStorage.getItem(KB_STORAGE_KEY);
-    if (raw !== null) {
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) {
-        return parsed;
-      }
-    }
-  } catch (e) {
-    console.warn("Failed to load KB records from storage:", e);
-  }
   return [];
 }
 
 export function saveStoredIndexingRecords(records) {
-  try {
-    localStorage.setItem(KB_STORAGE_KEY, JSON.stringify(records));
-  } catch (e) {
-    console.warn("Failed to save KB records to storage:", e);
-  }
 }

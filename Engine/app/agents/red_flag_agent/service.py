@@ -12,7 +12,9 @@ from app.agents.red_flag_agent.rule_engine import RuleEngine
 from app.infrastructure.database import DatabaseRepositoryInterface, get_database_repository
 from app.infrastructure.vector_store import VectorStoreInterface, get_vector_store
 from app.schemas.agents import ExtractedFinancials, RedFlagFinding
-
+from app.infrastructure.vector_store.ownership import (
+    get_owned_document_chunks
+)
 logger = logging.getLogger(__name__)
 
 SEVERITY_ORDER = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1}
@@ -39,8 +41,17 @@ class RedFlagAgentService:
         financials: ExtractedFinancials,
         session_id: Optional[str] = None,
         chunks: Optional[List[Dict[str, Any]]] = None,
+        *,
+        user_id: str,
     ) -> List[RedFlagFinding]:
         """Execute hybrid financial risk detection."""
+
+        document = self.repo.get_user_document(
+            document_id, user_id
+        )
+
+        if not document:
+            raise ValueError("Document not found.")
         logger.info("Starting Red Flag risk detection for document: %s", document_id)
         doc = self.repo.get_document_by_id(document_id)
         filename = doc.get("filename", "document.pdf") if doc else "document.pdf"
@@ -52,28 +63,12 @@ class RedFlagAgentService:
         # 2. Gather narrative chunks for disclosure analysis
         doc_chunks = chunks
         if not doc_chunks:
-            if hasattr(self.vector_store, "get_chunks_by_document"):
-                doc_chunks = self.vector_store.get_chunks_by_document(document_id)
-            if not doc_chunks:
-                dim = getattr(self.vector_store, "vector_size", 1536)
-                try:
-                    query_results = self.vector_store.search_chunks(
-                        query_embedding=[0.0] * dim,
-                        top_k=50,
-                        filters={"document_id": document_id},
-                    )
-                    doc_chunks = [
-                        {
-                            "text": r["text"],
-                            "page_number": r.get("metadata", {}).get("page_number", 1),
-                            "is_table": r.get("metadata", {}).get("is_table", False),
-                            "section": r.get("metadata", {}).get("section", ""),
-                        }
-                        for r in query_results
-                    ]
-                except Exception as search_err:
-                    logger.warning("Could not retrieve chunks via vector search fallback for red flag analysis on doc %s: %s", document_id, search_err)
-                    doc_chunks = []
+            doc_chunks = get_owned_document_chunks(
+                repository=self.repo,
+                vector_store=self.vector_store,
+                document_id=document_id,
+                user_id=user_id
+            )
 
         # 3. LLM-Based Disclosure Analysis Findings
         disclosure_findings = self.analyzer.analyze_disclosures(

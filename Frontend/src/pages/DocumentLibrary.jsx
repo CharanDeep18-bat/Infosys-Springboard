@@ -45,7 +45,6 @@ import {
   PROCESSING_STATUSES,
   formatFileSize
 } from "../data/documentData";
-import { SEED_COMPANIES } from "../data/seedData";
 import toast from "react-hot-toast";
 import api from "../services/api";
 import UploadDocument from "./UploadDocument";
@@ -83,24 +82,63 @@ export default function DocumentLibrary({
   const [isSeeding, setIsSeeding] = useState(false);
 
   async function handleSeedDocuments() {
+    if (isSeeding) return;
+
     setIsSeeding(true);
-    const toastId = toast.loading("Ingesting and indexing seed annual reports...");
+
+    const toastId = toast.loading(
+      "Importing FY 2024-25 annual reports..."
+    );
+
     try {
-      await api.seedDocuments();
-      const updated = await api.listDocuments();
-      if (Array.isArray(updated) && updated.length > 0) {
-        setDocuments(updated);
-        if (onUpdateDocuments) onUpdateDocuments(updated);
+      const results = await api.seedDocuments();
+
+      if (!Array.isArray(results)) {
+        throw new Error("Invalid seed import response");
       }
-      toast.success("Seed company filings indexed into vector store!", { id: toastId });
+
+      const successful = results.filter(
+        item => item.status === "success"
+      );
+
+      const failed = results.filter(
+        item => item.status === "failed"
+      );
+
+      const updated = await api.listDocuments();
+
+      setDocuments(updated);
+      onUpdateDocuments?.(updated);
+
+      if (results.length === 0) {
+        toast.error("No seed documents found.", {
+          id: toastId
+        });
+      } else if (successful.length === 0) {
+        toast.error("Seed document import failed.", {
+          id: toastId
+        });
+      } else if (failed.length > 0) {
+        toast(
+          `${successful.length} imported, ${failed.length} failed.`,
+          { id: toastId }
+        );
+      } else {
+        toast.success(
+          `${successful.length} filings available. New filings are scheduled for analysis.`,
+          { id: toastId }
+        );
+      }
+
     } catch (err) {
-      console.warn("Seeding failed or offline:", err);
-      toast.error("Failed to seed filings (check backend connection)", { id: toastId });
+      toast.error(
+        err.message || "Unable to import seed filings.",
+        { id: toastId }
+      );
     } finally {
       setIsSeeding(false);
     }
   }
-
   // Sync state to parent and localStorage whenever documents change
   
 
@@ -180,6 +218,35 @@ export default function DocumentLibrary({
   const totalCount = documents.length;
   const readyCount = documents.filter((d) => d.status === "Ready").length;
   const inFlightCount = documents.filter((d) => ["Parsing", "Chunking", "Indexing", "Uploaded"].includes(d.status)).length;
+  useEffect(() => {
+    if (inFlightCount === 0) return;
+
+    let cancelled = false;
+    let timer;
+
+    async function refreshProcessingStatus() {
+      try {
+        const updated = await api.listDocuments();
+
+        if (!cancelled && Array.isArray(updated)) {
+          setDocuments(updated);
+        }
+      } catch (err) {
+        console.warn("Processing status refresh failed:", err);
+      } finally {
+        if (!cancelled) {
+          timer = setTimeout(refreshProcessingStatus, 5000);
+        }
+      }
+    }
+
+    timer = setTimeout(refreshProcessingStatus, 5000);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [inFlightCount]);
   const seedCount = documents.filter((d) => d.isSeed).length;
 
   // Document Handlers
@@ -352,10 +419,10 @@ export default function DocumentLibrary({
             className="fin-btn fin-btn-secondary fin-btn-xs"
             onClick={handleSeedDocuments}
             disabled={isSeeding}
-            title="Ingest preloaded annual reports (Infosys, TCS, Microsoft) into the vector store"
+            title="Import FY 2024-25 annual reports of Infosys, TCS, Wipro and HCLTech"
           >
             <Sparkles size={13} className={`mr-1 text-accent ${isSeeding ? "animate-spin" : ""}`} />
-            <span>{isSeeding ? "Seeding Filings..." : "Ingest Seed Filings"}</span>
+            <span>{isSeeding ? "Importing Filings..." : "Load Starter Filings"}</span>
           </button>
         </div>
 
@@ -575,7 +642,9 @@ export default function DocumentLibrary({
                 filteredDocuments.map((doc) => {
                   const isReady = doc.status === "Ready";
                   const isError = doc.status === "Error";
-                  const isParsing = doc.status === "Parsing";
+                  const isParsing = ["Queued", "Processing"].includes(
+                    doc.status
+                  );
 
                   return (
                     <TableRow key={doc.id} className="hover:bg-hover transition-colors">
@@ -666,9 +735,22 @@ export default function DocumentLibrary({
                             </button>
                           </div>
                         ) : isParsing ? (
-                          <Badge variant="warning" size="sm" icon={RefreshCw} className="animate-pulse">
-                            Parsing
-                          </Badge>
+                          <div className="flex flex-col gap-1">
+                            <Badge
+                              variant="warning"
+                              size="sm"
+                              icon={RefreshCw}
+                              className="animate-pulse"
+                            >
+                              {doc.status}
+                            </Badge>
+
+                            {doc.processingStage && (
+                              <span className="text-xs opacity-70">
+                                {doc.processingStage.replace(/_/g, " ")}
+                              </span>
+                            )}
+                          </div>
                         ) : (
                           <Badge variant="teal" size="sm">
                             {doc.status}
@@ -856,7 +938,7 @@ export default function DocumentLibrary({
                 <FileText size={18} className="text-accent" />
                 <strong className="text-sm text-main">{quickPreviewDoc.name}</strong>
                 <Badge variant="teal" size="xs">
-                  {quickPreviewDoc.isSeed ? "Seed Demo" : "User File"}
+                  {quickPreviewDoc.isSeed ? "Company Filing" : "User File"}
                 </Badge>
               </div>
               <div className="flex-row items-center gap-2">

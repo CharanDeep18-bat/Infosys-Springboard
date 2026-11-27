@@ -44,7 +44,7 @@ class TestFinalRepairs(unittest.TestCase):
             ENGINE / "app" / "api" / "routes" / "documents.py"
         ).read_text(encoding="utf-8")
 
-        self.assertIn('status="PENDING"', content)
+        self.assertIn('status="QUEUED"', content)
 
     def test_pending_jobs_cancelled(self):
 
@@ -62,7 +62,7 @@ class TestFinalRepairs(unittest.TestCase):
         )
 
         self.assertIn(
-            "status IN ('PROCESSING', 'RUNNING')",
+            "AND status IN ('QUEUED', 'PROCESSING', 'RUNNING')",
             source
         )
 

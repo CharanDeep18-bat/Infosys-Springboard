@@ -5,7 +5,11 @@ from typing import List, Optional
 from fastapi import APIRouter, File, HTTPException, Query, UploadFile, Depends
 from app.api.dependencies.auth import get_current_user
 from fastapi.responses import FileResponse
+from fastapi import BackgroundTasks
 
+from app.orchestration.automatic_processing import (
+    process_uploaded_document,
+)
 from app.agents.document_agent import DocumentAgentService
 from app.infrastructure.database import get_database_repository
 from app.infrastructure.storage import get_file_storage
@@ -17,7 +21,6 @@ from app.api.dependencies.ownership import (
 )
 router = APIRouter(tags=["Documents"])
 
-
 def build_document_summary(d):
     created_val = d.get("created_at")
 
@@ -27,6 +30,12 @@ def build_document_summary(d):
         created_val = str(created_val)
     else:
         created_val = ""
+
+    repo = get_database_repository()
+
+    job = repo.get_latest_processing_job(
+        d["document_id"]
+    ) or {}
 
     return DocumentSummary(
         document_id=d["document_id"],
@@ -39,15 +48,18 @@ def build_document_summary(d):
         chunk_count=d.get("chunk_count", 0),
         indexed=bool(d.get("indexed", 0)),
         created_at=created_val,
-        metadata=d.get("metadata", {})
+        metadata=d.get("metadata", {}),
+        processing_status=job.get("status"),
+        processing_stage=job.get("current_stage"),
+        processing_job_id=job.get("job_id")
     )
-
 
 @router.post(
     "/documents/upload",
     response_model=DocumentUploadResponse
 )
 async def upload_document(
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     workspace_id: Optional[str] = Query(default=None),
     session_id: Optional[str] = Query(default=None),
@@ -119,11 +131,20 @@ async def upload_document(
                 document_id=result.document_id,
                 workspace_id=workspace_id,
                 session_id=session_id,
-                status="PENDING",
+                status="QUEUED",
                 current_stage="DOCUMENT_INGESTED",
             )
 
             result.job_id = job["job_id"]
+
+            background_tasks.add_task(
+                process_uploaded_document,
+                document_id=result.document_id,
+                user_id=user_id,
+                workspace_id=workspace_id,
+                session_id=session_id,
+                job_id=job["job_id"],
+            )
 
         return result
 
@@ -156,6 +177,7 @@ async def upload_document(
 )
 async def upload_document_to_session(
     session_id: str,
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     user: dict = Depends(get_current_user),
 ):
@@ -163,7 +185,7 @@ async def upload_document_to_session(
 
     session = repo.get_user_session(
         session_id=session_id,
-        user_id=user["id"]
+        user_id=user["id"],
     )
 
     if not session:
@@ -171,17 +193,16 @@ async def upload_document_to_session(
 
         raise HTTPException(
             status_code=404,
-            detail="Session not found"
+            detail="Session not found",
         )
 
     return await upload_document(
+        background_tasks=background_tasks,
         file=file,
         workspace_id=session["workspace_id"],
         session_id=session_id,
-        user=user
+        user=user,
     )
-
-
 @router.get("/documents/{document_id}", response_model=DocumentSummary)
 def get_document(
     document_id: str,
@@ -232,7 +253,8 @@ def list_documents(
     ]
 @router.post("/documents/seed")
 def ingest_seed_documents(
-    user: dict = Depends(get_current_user)
+    background_tasks: BackgroundTasks,
+    user: dict = Depends(get_current_user),
 ):
     from pathlib import Path
 
@@ -269,6 +291,24 @@ def ingest_seed_documents(
                 workspace_id=workspace_id,
                 user_id=user_id
             )
+
+            if not result.already_exists:
+                job = repo.create_processing_job(
+                    document_id=result.document_id,
+                    workspace_id=workspace_id,
+                    session_id=None,
+                    status="QUEUED",
+                    current_stage="DOCUMENT_INGESTED",
+                )
+
+                background_tasks.add_task(
+                    process_uploaded_document,
+                    document_id=result.document_id,
+                    user_id=user_id,
+                    workspace_id=workspace_id,
+                    session_id=None,
+                    job_id=job["job_id"],
+                )
 
             results.append({
                 "filename": pdf.name,

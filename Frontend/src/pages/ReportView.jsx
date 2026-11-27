@@ -1,256 +1,198 @@
 import React, { useState, useEffect } from "react";
+import { adaptSavedReport } from "../data/savedReportData";
 import ReportsLibrary from "../components/report/ReportsLibrary";
 import ReportConfigModal from "../components/report/ReportConfigModal";
 import ReportPreview from "../components/report/ReportPreview";
-import PdfExportModal from "../components/report/PdfExportModal";
 import RenameReportModal from "../components/report/RenameReportModal";
 import DeleteConfirmModal from "../components/report/DeleteConfirmModal";
-import {
-  getStoredReports,
-  saveStoredReports,
-  generateStructuredReportContent
-} from "../data/reportData";
+
+import { api } from "../services/api";
 
 export default function ReportView({
   session,
   sessions = [],
   onBack,
-  initialView = "library" // "library" | "preview"
+  initialView = "library"
 }) {
-  const [reports, setReports] = useState(() => getStoredReports());
-  const [currentView, setCurrentView] = useState(initialView);
-  const [activeReport, setActiveReport] = useState(() => {
-    if (session) {
-      const match = reports.find((r) => r.sessionId === session.id);
-      if (match) return match;
-    }
-    return reports[0] || null;
-  });
+  const [reports, setReports] = useState([]);
+  const [currentView, setCurrentView] = useState("library");
+  const [activeReport, setActiveReport] = useState(null);
 
-  // Modals state
   const [configModalOpen, setConfigModalOpen] = useState(false);
-  const [exportModalOpen, setExportModalOpen] = useState(false);
   const [renameTarget, setRenameTarget] = useState(null);
   const [deleteTarget, setDeleteTarget] = useState(null);
+  const [downloading, setDownloading] = useState(false);
+  const [error, setError] = useState("");
 
-  // Sync to localStorage
   useEffect(() => {
-    saveStoredReports(reports);
-  }, [reports]);
+    setCurrentView("library");
+  }, [initialView, session?.id]);
+  useEffect(() => {
+    let cancelled = false;
 
-  // Synchronize view mode if initialView prop changes (e.g., clicking "Read Dossier" vs "Research Reports")
-  useEffect(() => {
-    if (initialView) {
-      setCurrentView(initialView);
-    }
-  }, [initialView]);
+    async function loadReports() {
+      try {
+        const result = await api.listReports();
 
-  // If session changes from header/workspace, adjust default report
-  useEffect(() => {
-    if (session) {
-      const match = reports.find((r) => r.sessionId === session.id);
-      if (match) {
-        setActiveReport(match);
+        if (!cancelled) {
+          setReports(result.map(adaptSavedReport));
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setError(
+            err.message || "Unable to load saved reports"
+          );
+        }
       }
     }
-  }, [session?.id]);
 
-  // Handle generating a new report (with simulated pipeline)
-  function handleCreateReport(config) {
-    if (config.status === "Generating") {
-      window.alert(
-        "Live report generation is not connected to this interface yet."
-      );
-      return;
-    }
-    const newReport = {
-      id: `rep-${Date.now()}`,
-      createdAt: new Date().toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }),
-      updatedAt: new Date().toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }),
-      summarySnippet: `Multi-agent research dossier analyzing ${config.company} across ${config.sections?.length || 5} audited reporting modules.`,
-      generationProgress: config.status === "Generating" ? 25 : 100,
-      generationStage: config.status === "Generating" ? "Parsing audited footnote disclosures..." : "",
-      ...config
+    loadReports();
+
+    return () => {
+      cancelled = true;
     };
+  }, []);
+  async function handleCreateReport(config) {
+    setError("");
 
-    const updated = [newReport, ...reports];
-    setReports(updated);
+    const result = await api.generateReport(
+      config.documentId,
+      config.comparisonDocumentIds
+    );
+
+    const newReport = adaptSavedReport(result);
+
+    setReports(prev => [
+      newReport,
+      ...prev.filter(r => r.id !== newReport.id)
+    ]);
+
     setActiveReport(newReport);
-
-    // If generating, simulate asynchronous multi-agent pipeline
-    if (config.status === "Generating") {
-      setTimeout(() => {
-        setReports((prev) =>
-          prev.map((r) =>
-            r.id === newReport.id
-              ? {
-                  ...r,
-                  generationProgress: 60,
-                  generationStage: "Harmonizing GAAP/IFRS ratios with industry peer benchmarks..."
-                }
-              : r
-          )
-        );
-
-        setTimeout(() => {
-          setReports((prev) =>
-            prev.map((r) =>
-              r.id === newReport.id
-                ? {
-                    ...r,
-                    generationProgress: 90,
-                    generationStage: "Injecting verified citation anchors and auditor verification..."
-                  }
-                : r
-            )
-          );
-
-          setTimeout(() => {
-            setReports((prev) =>
-              prev.map((r) =>
-                r.id === newReport.id
-                  ? {
-                      ...r,
-                      status: "Completed",
-                      generationProgress: 100,
-                      generationStage: ""
-                    }
-                  : r
-              )
-            );
-          }, 800);
-        }, 900);
-      }, 800);
-    }
+    setCurrentView("preview");
   }
 
-  // Handle previewing a report
   function handlePreviewReport(report) {
     setActiveReport(report);
     setCurrentView("preview");
   }
 
-  // Handle opening export modal for a report
-  function handleOpenDownload(report) {
-    setActiveReport(report);
-    setExportModalOpen(true);
-  }
+  async function handleDownloadReport(report) {
+    if (!report || downloading) return;
 
-  // Handle renaming a report
-  function handleRenameReport(reportId, newTitle) {
-    const updated = reports.map((r) =>
-      r.id === reportId
-        ? {
-            ...r,
-            title: newTitle,
-            updatedAt: new Date().toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })
-          }
-        : r
-    );
-    setReports(updated);
-    if (activeReport?.id === reportId) {
-      setActiveReport((prev) => ({ ...prev, title: newTitle }));
+    setDownloading(true);
+    setError("");
+
+    try {
+      const blob = await api.downloadSavedReport(
+        report.id
+      );
+
+      const url = URL.createObjectURL(blob);
+
+      const link = document.createElement("a");
+
+      link.href = url;
+      link.download =
+        report.title.replace(/[^a-zA-Z0-9_-]/g, "_") + ".pdf";
+
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+
+    } catch (err) {
+      setError(err.message || "PDF download failed.");
+    } finally {
+      setDownloading(false);
     }
   }
 
-  // Handle deleting a report
-  function handleDeleteReport(reportId) {
-    const updated = reports.filter((r) => r.id !== reportId);
-    setReports(updated);
-    if (activeReport?.id === reportId) {
-      setActiveReport(updated[0] || null);
-      if (updated.length === 0) {
-        setCurrentView("library");
-      }
-    }
-  }
+  async function handleRenameReport(reportId, newTitle) {
+    setError("");
 
-  // Handle retrying a failed report
-  function handleRetryGeneration(reportId) {
-    setReports((prev) =>
-      prev.map((r) =>
-        r.id === reportId
-          ? {
-              ...r,
-              status: "Generating",
-              generationProgress: 35,
-              generationStage: "Retrying vector retrieval cluster query...",
-              failureReason: null
-            }
-          : r
-      )
-    );
+    try {
+      const result = await api.renameReport(
+        reportId,
+        newTitle
+      );
 
-    setTimeout(() => {
-      setReports((prev) =>
-        prev.map((r) =>
-          r.id === reportId
-            ? {
-                ...r,
-                generationProgress: 80,
-                generationStage: "Reconciling Note 24 derivatives with balance sheet..."
-              }
-            : r
+      const updated = adaptSavedReport(result);
+
+      setReports(prev =>
+        prev.map(r =>
+          r.id === reportId ? updated : r
         )
       );
 
-      setTimeout(() => {
-        setReports((prev) =>
-          prev.map((r) =>
-            r.id === reportId
-              ? {
-                  ...r,
-                  status: "Completed",
-                  generationProgress: 100,
-                  generationStage: ""
-                }
-              : r
-          )
-        );
-      }, 900);
-    }, 900);
+      setActiveReport(prev =>
+        prev?.id === reportId ? updated : prev
+      );
+
+      setRenameTarget(null);
+
+    } catch (err) {
+      setError(
+        err.message || "Unable to rename report"
+      );
+    }
+  }
+
+  async function handleDeleteReport(reportId) {
+    setError("");
+
+    try {
+      await api.deleteReport(reportId);
+
+      setReports(prev =>
+        prev.filter(r => r.id !== reportId)
+      );
+
+      if (activeReport?.id === reportId) {
+        setActiveReport(null);
+        setCurrentView("library");
+      }
+
+      setDeleteTarget(null);
+
+    } catch (err) {
+      setError(
+        err.message || "Unable to delete report"
+      );
+    }
   }
 
   return (
     <div className="fin-reports-module-page">
-      {/* Milestone 4 Deferred Notice Banner */}
-      <div className="mb-4 px-4 py-3 rounded-lg border border-amber-800/40 bg-amber-950/20 text-amber-300 flex items-center justify-between gap-3 text-xs">
-        <div className="flex items-center gap-2 flex-wrap">
-          <span className="px-2 py-0.5 rounded bg-amber-900/60 text-amber-300 font-mono text-[10px] font-bold uppercase tracking-wider">
-            Milestone 4 — Under Development
-          </span>
-          <span className="text-muted text-[11px]">
-            Executive Report Generation Agent is scheduled for Milestone 4. Below is the preview layout interface.
-          </span>
+      {error && (
+        <div className="p-3 text-danger">
+          {error}
         </div>
-        <span className="text-[11px] text-amber-400 font-medium whitespace-nowrap">
-          Scope: Milestones 1 &amp; 2 Active
-        </span>
-      </div>
-
-      {/* View 1: Reports Library */}
-      {currentView === "library" && (
-        <ReportsLibrary
-          reports={reports}
-          onGenerateReportClick={() => setConfigModalOpen(true)}
-          onPreviewReport={handlePreviewReport}
-          onDownloadReport={handleOpenDownload}
-          onRenameReport={(r) => setRenameTarget(r)}
-          onDeleteReport={(r) => setDeleteTarget(r)}
-          onRetryGeneration={handleRetryGeneration}
-        />
       )}
 
-      {/* View 2: Report Preview */}
-      {currentView === "preview" && activeReport && (
+      {currentView === "preview" && activeReport ? (
         <ReportPreview
           report={activeReport}
           onBackToLibrary={() => setCurrentView("library")}
-          onOpenPdfExport={() => setExportModalOpen(true)}
+          onOpenPdfExport={() =>
+            handleDownloadReport(activeReport)
+          }
+          downloading={downloading}
+        />
+      ) : (
+        <ReportsLibrary
+          reports={reports}
+          onGenerateReportClick={() =>
+            setConfigModalOpen(true)
+          }
+          onPreviewReport={handlePreviewReport}
+          onDownloadReport={handleDownloadReport}
+          onRenameReport={setRenameTarget}
+          onDeleteReport={setDeleteTarget}
+          onRetryGeneration={() => setConfigModalOpen(true)}
         />
       )}
 
-      {/* Page 2: Report Configuration Modal */}
       <ReportConfigModal
         open={configModalOpen}
         onClose={() => setConfigModalOpen(false)}
@@ -259,19 +201,6 @@ export default function ReportView({
         onGenerateReport={handleCreateReport}
       />
 
-      {/* Page 4: PDF Export Modal */}
-      <PdfExportModal
-        open={exportModalOpen}
-        onClose={() => setExportModalOpen(false)}
-        report={activeReport}
-        onPrint={() => window.print()}
-        onReturnToLibrary={() => {
-          setExportModalOpen(false);
-          setCurrentView("library");
-        }}
-      />
-
-      {/* Rename Modal */}
       <RenameReportModal
         open={Boolean(renameTarget)}
         onClose={() => setRenameTarget(null)}
@@ -279,7 +208,6 @@ export default function ReportView({
         onSave={handleRenameReport}
       />
 
-      {/* Delete Confirmation Modal */}
       <DeleteConfirmModal
         open={Boolean(deleteTarget)}
         onClose={() => setDeleteTarget(null)}

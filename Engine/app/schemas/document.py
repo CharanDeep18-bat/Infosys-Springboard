@@ -17,6 +17,9 @@ class DocumentSummary(BaseModel):
     indexed: bool
     created_at: Union[str, datetime]
     metadata: Dict[str, Any] = Field(default_factory=dict)
+    processing_status: Optional[str] = None
+    processing_stage: Optional[str] = None
+    processing_job_id: Optional[str] = None
 
 
 class DocumentUploadResponse(BaseModel):

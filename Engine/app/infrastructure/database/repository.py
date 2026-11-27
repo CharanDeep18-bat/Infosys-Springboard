@@ -941,7 +941,7 @@ class SQLiteRepository(DatabaseRepositoryInterface):
                 """
                 SELECT 1 FROM ai_processing_jobs
                 WHERE session_id = ?
-                AND status IN ('PROCESSING', 'RUNNING')
+                AND status IN ('QUEUED', 'PROCESSING', 'RUNNING')
                 LIMIT 1
                 """,
                 (session_id,)
@@ -1628,6 +1628,20 @@ class SQLiteRepository(DatabaseRepositoryInterface):
             row = conn.execute(
                 "SELECT * FROM ai_processing_jobs WHERE job_id = ?", (job_id,)
             ).fetchone()
+            return dict(row) if row else None
+
+    def get_latest_processing_job(self, document_id: str):
+        with self._get_connection() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM ai_processing_jobs
+                WHERE document_id = ?
+                ORDER BY created_at DESC, rowid DESC
+                LIMIT 1
+                """,
+                (document_id,)
+            ).fetchone()
+
             return dict(row) if row else None
 
     def claim_next_processing_job(self) -> Optional[Dict[str, Any]]:
@@ -2743,6 +2757,25 @@ class SupabasePostgresRepository(DatabaseRepositoryInterface):
                 logger.debug("Postgres error in get_processing_job: %s", e)
         return self._fallback_repo.get_processing_job(job_id)
 
+
+    def get_latest_processing_job(self, document_id: str):
+        if self._is_connected and self._engine:
+            with self._engine.connect() as conn:
+                row = conn.execute(
+                    text("""
+                        SELECT * FROM ai_processing_jobs
+                        WHERE document_id = :document_id
+                        ORDER BY created_at DESC, job_id DESC
+                        LIMIT 1
+                    """),
+                    {"document_id": document_id}
+                ).mappings().first()
+
+                return self._format_row(row) if row else None
+
+        return self._fallback_repo.get_latest_processing_job(
+            document_id
+        )
     def claim_next_processing_job(self) -> Optional[Dict[str, Any]]:
         if self._is_connected and self._engine:
             try:

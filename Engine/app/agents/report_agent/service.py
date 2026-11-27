@@ -10,7 +10,7 @@ findings. No section fabricates a financial value.
 """
 
 from __future__ import annotations
-
+from app.agents.comparison_agent.service import ComparisonAgentService
 import logging
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
@@ -35,8 +35,7 @@ STATEMENT_TITLES = {
     "KEY_RATIOS": "Key Ratios",
 }
 
-PLANNED_SECTIONS = ["Red Flags", "Company Comparison", "Outlook"]
-
+PLANNED_SECTIONS = []
 
 def _decimal(value: Any) -> Optional[Decimal]:
     try:
@@ -51,32 +50,81 @@ class ReportAgentService:
     def __init__(self, repository: Optional[DatabaseRepositoryInterface] = None):
         self.repo = repository or get_database_repository()
         # Extensible section registry: Milestone 4 adds red_flags, comparison, outlook.
-        self.section_builders: Dict[str, Callable[..., ReportSection]] = {
+        self.section_builders = {
             "executive_summary": self._build_executive_summary,
             "key_financials": self._build_key_financials,
+            "red_flags": self._build_red_flags,
+            "company_comparison": self._build_company_comparison,
+            "outlook": self._build_outlook,
         }
 
-    def generate_report(self, document_id: str) -> GeneratedReport:
-        doc = self.repo.get_document_by_id(document_id)
-        if not doc:
-            raise ValueError(f"Document '{document_id}' not found.")
+    def generate_report(
+        self,
+        document_id: str,
+        *,
+        user_id: str,
+        comparison_document_ids: Optional[List[str]] = None,
+    ) -> GeneratedReport:
 
-        metrics = self.repo.get_financial_metrics(document_id)
+        document_ids = list(dict.fromkeys(
+            [document_id] + (comparison_document_ids or [])
+        ))
+
+        documents = []
+
+        for doc_id in document_ids:
+            doc = self.repo.get_user_document(
+                document_id=doc_id,
+                user_id=user_id
+            )
+
+            if not doc:
+                raise ValueError("Document not found.")
+
+            documents.append(doc)
+
+        doc = documents[0]
+
+        if any(
+            d["workspace_id"] != doc["workspace_id"]
+            for d in documents
+        ):
+            raise ValueError(
+                "All documents must belong to the same workspace."
+            )
+
+        metrics = [
+            m for m in self.repo.get_financial_metrics(document_id)
+            if (m.get("citation") or {}).get("page_number")
+            and (m.get("citation") or {}).get("exact_quote")
+            and m.get("numeric_value") is not None
+        ]
+
         if not metrics:
             raise ValueError(
-                f"No extracted financial metrics found for document '{document_id}'. "
+                "No source-cited financial metrics found. "
                 "Run the document analysis pipeline first."
             )
 
         metadata = doc.get("metadata") or {}
+
         company_name = (
             metadata.get("company_name")
-            or doc.get("filename", "document.pdf").rsplit(".", 1)[0].replace("_", " ").title()
+            or doc.get("filename", "document.pdf")
+            .rsplit(".", 1)[0]
+            .replace("_", " ")
+            .title()
         )
+
         fiscal_year = next(
-            (m.get("fiscal_year") for m in metrics if m.get("fiscal_year")),
+            (
+                m.get("fiscal_year")
+                for m in metrics
+                if m.get("fiscal_year")
+            ),
             metadata.get("fiscal_year"),
         )
+
         findings = self.repo.get_red_flag_findings(document_id)
 
         context = {
@@ -85,46 +133,64 @@ class ReportAgentService:
             "findings": findings,
             "company_name": company_name,
             "fiscal_year": int(fiscal_year) if fiscal_year else None,
+            "document_ids": document_ids,
         }
 
-        sections: List[ReportSection] = [
-            self.section_builders["executive_summary"](**context),
-            self.section_builders["key_financials"](**context),
+        sections = [
+            builder(**context)
+            for builder in self.section_builders.values()
         ]
 
-        citations: List[AgentCitation] = []
+        citations = []
         seen = set()
+
         for section in sections:
             for citation in section.citations:
-                key = (citation.document_id, citation.page_number, citation.metric_name)
+                key = (
+                    citation.document_id,
+                    citation.page_number,
+                    citation.metric_name,
+                    citation.exact_quote,
+                )
+
                 if key not in seen:
                     seen.add(key)
                     citations.append(citation)
 
-        limitations: List[str] = []
+        limitations = [
+            "This report uses stored financial extraction and risk findings.",
+            "Missing financial information is not estimated.",
+            "Historical results do not establish future performance.",
+            "The report is intended for educational research.",
+        ]
+
         if len(metrics) < 5:
-            limitations.append("Only a small number of metrics were extracted; the summary is correspondingly narrow.")
+            limitations.append(
+                "Limited extracted metrics restrict the analysis."
+            )
+
         if any(m.get("is_calculated") for m in metrics):
-            limitations.append("Ratio figures are deterministic calculations over reported statement values.")
-        limitations.append(
-            "Outlook, peer comparison, and PDF export are Milestone 4 deliverables and are not generated here."
-        )
+            limitations.append(
+                "Calculated ratios depend on cited financial inputs."
+            )
 
         return GeneratedReport(
             report_id=uuid4().hex,
             document_id=document_id,
             company_name=company_name,
             fiscal_year=int(fiscal_year) if fiscal_year else None,
-            title=f"{company_name} — Financial Research Report"
-            + (f" (FY{fiscal_year})" if fiscal_year else ""),
+            title=f"{company_name} — Financial Research Report",
             generated_at=datetime.now(timezone.utc).isoformat(),
-            status="PARTIAL_M3",
+            status=(
+                "COMPLETE"
+                if all(s.status == "generated" for s in sections)
+                else "COMPLETE_WITH_LIMITATIONS"
+            ),
             sections=sections,
-            planned_sections=list(PLANNED_SECTIONS),
+            planned_sections=[],
             citations=citations,
             limitations=limitations,
         )
-
     # ------------------------------------------------------------------
     # Section builders
     # ------------------------------------------------------------------
@@ -287,5 +353,236 @@ class ReportAgentService:
             title="Key Financials",
             status="generated",
             content_markdown="\n".join(lines),
+            citations=citations,
+        )
+    
+    def _build_red_flags(
+        self,
+        document,
+        findings,
+        company_name,
+        **_,
+    ) -> ReportSection:
+
+        lines = []
+        citations = []
+
+        for finding in findings:
+
+            page = finding.get("source_page")
+            evidence = finding.get("supporting_evidence")
+
+            if not page or not evidence:
+                continue
+
+            title = finding.get("title", "Risk finding")
+            severity = finding.get("severity", "Unknown")
+
+            lines.append(
+                f"### {title}\n"
+                f"Severity: {severity}\n\n"
+                f"{finding.get('description', '')}\n\n"
+                f"Supporting evidence: {evidence}\n\n"
+                f"Source: {document['filename']}, page {page}"
+            )
+
+            citations.append(
+                AgentCitation(
+                    document_id=document["document_id"],
+                    document_name=document["filename"],
+                    company=company_name,
+                    page_number=int(page),
+                    exact_quote=str(evidence),
+                    section="red_flags",
+                )
+            )
+
+        if not lines:
+            lines.append(
+                "No source-supported red flag findings "
+                "are currently available. This does not "
+                "establish that the company is risk-free."
+            )
+
+        return ReportSection(
+            section_key="red_flags",
+            title="Red Flags",
+            status="generated" if citations else "unavailable",
+            content_markdown="\n\n".join(lines),
+            citations=citations,
+        )
+
+    def _build_company_comparison(
+        self,
+        document_ids,
+        **_,
+    ) -> ReportSection:
+
+        if len(document_ids) < 2:
+            return ReportSection(
+                section_key="company_comparison",
+                title="Company Comparison",
+                status="unavailable",
+                content_markdown=(
+                    "Select at least two analyzed company "
+                    "documents to generate a comparison."
+                ),
+            )
+
+        service = ComparisonAgentService(
+            repository=self.repo
+        )
+
+        comparison = service.compare_documents(
+            document_ids=document_ids
+        )
+
+        valid_citations = [
+            c for c in comparison.citations
+            if c.page_number > 0 and c.exact_quote.strip()
+        ]
+
+        supported = {
+            (c.document_id, c.metric_name)
+            for c in valid_citations
+        }
+
+        lines = []
+        included = 0
+
+        for company in comparison.companies:
+
+            lines.append(f"### {company.company_name}")
+
+            lines.append(
+                f"Reporting period: "
+                f"{company.fiscal_year or 'Unavailable'}"
+            )
+
+            lines.append(
+                "| Metric | Reported Value | Source |"
+            )
+            lines.append("| --- | --- | --- |")
+
+            for metric in company.metrics:
+
+                if (
+                    company.document_id,
+                    metric.metric_name
+                ) not in supported:
+
+                    lines.append(
+                        f"| {metric.metric_name} "
+                        "| Unavailable | — |"
+                    )
+                    continue
+
+                label = _METRIC_LABELS.get(
+                    metric.metric_name,
+                    metric.metric_name
+                )
+
+                lines.append(
+                    f"| {label} "
+                    f"| {metric.display_value} "
+                    f"| p. {metric.page_number} |"
+                )
+
+                included += 1
+
+            lines.append("")
+
+        lines.append("### Comparison limitations")
+
+        for warning in comparison.warnings:
+            lines.append(f"- {warning}")
+
+        for limitation in comparison.limitations:
+            lines.append(f"- {limitation}")
+
+        return ReportSection(
+            section_key="company_comparison",
+            title="Company Comparison",
+            status="generated" if included else "unavailable",
+            content_markdown="\n".join(lines),
+            citations=valid_citations,
+        )
+    def _build_outlook(
+        self,
+        document,
+        metrics,
+        company_name,
+        **_,
+    ) -> ReportSection:
+
+        lines = [
+            "The following indicators provide a historical "
+            "basis for monitoring future financial performance. "
+            "They are not forecasts."
+        ]
+
+        citations = []
+
+        indicators = {
+            "REVENUE": "Revenue performance",
+            "NET_INCOME": "Profitability",
+            "OPERATING_MARGIN": "Operating efficiency",
+            "DEBT_TO_EQUITY": "Financial leverage",
+            "CURRENT_RATIO": "Short-term liquidity",
+            "OPERATING_CASH_FLOW": "Cash generation",
+        }
+
+        for metric in metrics:
+
+            name = metric.get("metric_name")
+
+            if name not in indicators:
+                continue
+
+            citation = metric.get("citation") or {}
+            page = citation.get("page_number")
+            quote = citation.get("exact_quote")
+
+            if not page or not quote:
+                continue
+
+            display = format_metric_value(
+                name,
+                metric.get("numeric_value"),
+                metric.get("unit", ""),
+                metric.get("currency", ""),
+            )
+
+            lines.append(
+                f"- {indicators[name]}: "
+                f"{display} (page {page})."
+            )
+
+            citations.append(
+                AgentCitation(
+                    document_id=document["document_id"],
+                    document_name=document["filename"],
+                    company=company_name,
+                    page_number=int(page),
+                    exact_quote=str(quote),
+                    metric_name=name,
+                    is_calculated=bool(
+                        metric.get("is_calculated")
+                    ),
+                    section="outlook",
+                )
+            )
+
+        lines.append(
+            "Future revenue, earnings, growth rates and "
+            "share prices cannot be established from "
+            "these historical metrics alone."
+        )
+
+        return ReportSection(
+            section_key="outlook",
+            title="Outlook",
+            status="generated" if citations else "unavailable",
+            content_markdown="\n\n".join(lines),
             citations=citations,
         )

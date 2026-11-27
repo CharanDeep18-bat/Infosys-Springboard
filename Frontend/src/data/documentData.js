@@ -8,13 +8,13 @@ export const DOCUMENT_TYPES = [
   "Earnings Transcript",
   "Investor Presentation"
 ];
-
 export const PROCESSING_STATUSES = [
   "Ready",
-  "Parsing",
-  "Chunking",
-  "Indexing",
+  "Queued",
+  "Processing",
+  "Indexed",
   "Uploaded",
+  "Cancelled",
   "Error"
 ];
 

@@ -1,81 +1,69 @@
 import React, { useState, useEffect } from "react";
-import {
-  X,
-  FileCheck2,
-  Building2,
-  FileText,
-  Layers,
-  Sparkles,
-  AlertCircle,
-  Check,
-  CheckSquare,
-  Square,
-  Info,
-  Clock,
-  ArrowRight
-} from "lucide-react";
-import { AVAILABLE_REPORT_SECTIONS } from "../../data/reportData";
-import { SEED_COMPANIES } from "../../data/seedData";
+import { X, FileCheck2, Sparkles } from "lucide-react";
 import { api } from "../../services/api";
+
 export default function ReportConfigModal({
   open,
   onClose,
   sessions = [],
   activeSession,
-  onGenerateReport,
-  onSaveDraft
+  onGenerateReport
 }) {
+  const [sessionId, setSessionId] = useState("");
+  const [documents, setDocuments] = useState([]);
+  const [primaryId, setPrimaryId] = useState("");
+  const [comparisonIds, setComparisonIds] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState("");
 
-  // Selected session
-  const defaultSession = activeSession || sessions[0];
-  const [selectedSessionId, setSelectedSessionId] = useState(defaultSession?.id || "");
-  const currentSession = sessions.find((s) => s.id === selectedSessionId) || defaultSession;
-
-  // Selected companies (IDs)
-  const [selectedCompanyIds, setSelectedCompanyIds] = useState(() => {
-    return currentSession?.companyIds || ["INFY", "TCS"];
-  });
-
-  // Report Title
-  const [reportTitle, setReportTitle] = useState(() => {
-    const primaryName = SEED_COMPANIES[currentSession?.companyIds?.[0]]?.name || "Target Entity";
-    return `FY24 Institutional Research Dossier: ${primaryName}`;
-  });
-
-  const [availableDocs, setAvailableDocs] = useState([]);
-  const [selectedDocIds, setSelectedDocIds] = useState([]);
+  useEffect(() => {
+    if (open) {
+      setSessionId(activeSession?.id || "");
+      setError("");
+    }
+  }, [open, activeSession?.id]);
 
   useEffect(() => {
     if (!open) return;
 
     let cancelled = false;
 
-    setAvailableDocs([]);
-    setSelectedDocIds([]);
+    setDocuments([]);
+    setPrimaryId("");
+    setComparisonIds([]);
+    setLoading(true);
+    setError("");
 
     async function loadDocuments() {
       try {
         const docs = await api.listDocuments();
 
-        const sessionDocIds = new Set(
-          (currentSession?.documents || []).map(
-            (doc) => typeof doc === "string" ? doc : doc.id
+        const session = sessions.find(
+          s => s.id === sessionId
+        );
+
+        const ids = new Set(
+          (session?.documents || []).map(
+            d => typeof d === "string" ? d : d.id
           )
         );
 
-        const filtered = currentSession
-          ? docs.filter((doc) => sessionDocIds.has(doc.id))
-          : docs;
+        const filtered = docs.filter(d =>
+          d.status === "Ready" &&
+          (!sessionId || ids.has(d.id))
+        );
 
         if (!cancelled) {
-          setAvailableDocs(filtered);
-          setSelectedDocIds(filtered.map((doc) => doc.id));
+          setDocuments(filtered);
+          setPrimaryId(filtered[0]?.id || "");
         }
-      } catch (error) {
+      } catch (err) {
         if (!cancelled) {
-          setAvailableDocs([]);
-          setSelectedDocIds([]);
+          setError(err.message || "Unable to load documents.");
         }
+      } finally {
+        if (!cancelled) setLoading(false);
       }
     }
 
@@ -84,427 +72,189 @@ export default function ReportConfigModal({
     return () => {
       cancelled = true;
     };
-  }, [open, currentSession?.id]);
-  // Selected sections (IDs)
-  const [selectedSectionIds, setSelectedSectionIds] = useState([
-    "executive_summary",
-    "key_financials",
-    "red_flags",
-    "company_comparison",
-    "outlook"
-  ]);
+  }, [open, sessionId, sessions]);
 
-  // Validation errors
-  const [errors, setErrors] = useState({});
-  const [isSubmitting, setIsSubmitting] = useState(false);
-
-  // When session changes, update companies, docs, and suggest a title
-  function handleSessionChange(sessionId) {
-    setSelectedSessionId(sessionId);
-    const ses = sessions.find((s) => s.id === sessionId);
-    if (ses) {
-      const cids = ses.companyIds || ["INFY"];
-      setSelectedCompanyIds(cids);
-
-      setAvailableDocs([]);
-      setSelectedDocIds([]);
-
-      const primary = SEED_COMPANIES[cids[0]]?.name || "Target Entity";
-      setReportTitle(
-        cids.length > 1
-          ? `FY24 IT Services Peer Benchmarking Dossier: ${primary} vs ${SEED_COMPANIES[cids[1]]?.name || "Peer"}`
-          : `FY24 Comprehensive Financial Dossier: ${primary}`
-      );
-    }
-  }
-
-  // Toggle company
-  function handleToggleCompany(cid) {
-    setSelectedCompanyIds((prev) =>
-      prev.includes(cid)
-        ? prev.filter((id) => id !== cid)
-        : [...prev, cid]
+  function toggleComparison(id) {
+    setComparisonIds(prev =>
+      prev.includes(id)
+        ? prev.filter(x => x !== id)
+        : prev.length < 10
+          ? [...prev, id]
+          : prev
     );
   }
 
-  // Toggle document
-  function handleToggleDoc(docId) {
-    setSelectedDocIds((prev) =>
-      prev.includes(docId) ? prev.filter((id) => id !== docId) : [...prev, docId]
-    );
-  }
+  async function handleSubmit() {
+    if (!primaryId || submitting) return;
 
-  // Toggle section
-  function handleToggleSection(sectionId) {
-    setSelectedSectionIds((prev) =>
-      prev.includes(sectionId) ? prev.filter((id) => id !== sectionId) : [...prev, sectionId]
-    );
-  }
+    setSubmitting(true);
+    setError("");
 
-  function handleSelectAllSections() {
-    setSelectedSectionIds(AVAILABLE_REPORT_SECTIONS.map((s) => s.id));
-  }
+    try {
+      await onGenerateReport({
+        documentId: primaryId,
+        comparisonDocumentIds: comparisonIds.filter(
+          id => id !== primaryId
+        ),
+        sessionId
+      });
 
-  function handleDeselectOptionalSections() {
-    setSelectedSectionIds(["executive_summary"]);
-  }
-
-  // Validation
-  function validateForm() {
-    const errs = {};
-    if (selectedDocIds.length === 0) {
-      errs.documents = "Please select at least one uploaded document.";
-    }
-    if (!reportTitle.trim()) {
-      errs.title = "Report title is required.";
-    }
-    if (selectedCompanyIds.length === 0) {
-      errs.companies = "Please select at least one company.";
-    }
-    if (selectedSectionIds.length === 0) {
-      errs.sections = "Please select at least one report section.";
-    }
-    if (selectedSectionIds.includes("company_comparison") && selectedCompanyIds.length < 2) {
-      errs.comparison = "Company Comparison requires at least 2 selected companies. Deselect this section or select a second company.";
-    }
-    setErrors(errs);
-    return Object.keys(errs).length === 0;
-  }
-
-  function handleSubmit(status = "Generating") {
-    if (!validateForm()) return;
-
-    setIsSubmitting(true);
-
-    const primaryCompany = SEED_COMPANIES[selectedCompanyIds[0]]?.name || "General Entity";
-    const companyLabel =
-      selectedCompanyIds.length > 1
-        ? `${SEED_COMPANIES[selectedCompanyIds[0]]?.name || "Company A"} & ${SEED_COMPANIES[selectedCompanyIds[1]]?.name || "Company B"}`
-        : primaryCompany;
-
-    const selectedDocObjects = availableDocs.filter((d) => selectedDocIds.includes(d.id));
-
-    const newReportConfig = {
-      title: reportTitle.trim(),
-      company: companyLabel,
-      companyIds: selectedCompanyIds,
-      documentIds: selectedDocObjects.map((d) => d.id),
-      sessionId: currentSession?.id || "session-custom",
-      sessionTitle: currentSession?.title || "Financial Analysis Session",
-      status: status, // "Generating" | "Draft"
-      sections: selectedSectionIds,
-      sourceDocuments: selectedDocObjects.map((d) => d.name),
-      isDemo: true,
-      hasRealPdf: false
-    };
-
-    setTimeout(() => {
-      setIsSubmitting(false);
-      onGenerateReport(newReportConfig);
       onClose();
-    }, 400);
+    } catch (err) {
+      setError(err.message || "Report generation failed.");
+    } finally {
+      setSubmitting(false);
+    }
   }
 
   if (!open) return null;
 
-
   return (
-    <div className="fin-modal-overlay" onClick={onClose} role="dialog" aria-modal="true">
-      <div className="fin-report-config-modal-card" onClick={(e) => e.stopPropagation()}>
-        {/* Modal Header */}
+    <div className="fin-modal-overlay">
+      <div className="fin-report-config-modal-card">
         <div className="modal-header-row">
-          <div className="flex-row items-center gap-2">
-            <div className="modal-icon-badge">
-              <FileCheck2 size={20} className="text-teal" />
-            </div>
-            <div>
-              <h3 className="text-base font-bold text-main">Configure Research Report</h3>
-              <span className="text-xs text-muted block">
-                Define scope, company benchmarks, and sections for automated compilation
-              </span>
-            </div>
-          </div>
+          <h3 className="text-base font-bold text-main">
+            <FileCheck2 size={20} />
+            Configure Research Report
+          </h3>
 
           <button
-            type="button"
             className="modal-close-btn"
             onClick={onClose}
-            aria-label="Close configuration modal"
+            disabled={submitting}
           >
             <X size={18} />
           </button>
         </div>
 
-        {/* Modal Body Form */}
         <div className="modal-body-scroll config-form-body">
-          {/* 1. Research Session Selection */}
           <div className="config-form-group">
-            <label htmlFor="config-session" className="config-label flex-row items-center justify-between">
-              <span>1. Associated Research Session:</span>
-              <span className="text-[11px] text-teal">Auto-populates session filings</span>
+            <label className="config-label">
+              Research Session
             </label>
+
             <select
-              id="config-session"
-              className="fin-select fin-select-sm w-full"
-              value={selectedSessionId}
-              onChange={(e) => handleSessionChange(e.target.value)}
+              className="fin-select w-full"
+              value={sessionId}
+              disabled={submitting}
+              onChange={e => setSessionId(e.target.value)}
             >
-              {sessions.map((s) => (
+              <option value="">All my documents</option>
+
+              {sessions.map(s => (
                 <option key={s.id} value={s.id}>
-                  {s.title} ({s.company || "General"})
+                  {s.title}
                 </option>
               ))}
             </select>
           </div>
 
-          {/* 2. Report Title */}
           <div className="config-form-group mt-3">
-            <label htmlFor="config-title" className="config-label">
-              <span>2. Report Title:</span>
-              <span className="text-danger ml-1">*</span>
+            <label className="config-label">
+              Primary Financial Document
             </label>
-            <input
-              id="config-title"
-              type="text"
-              className={`fin-input fin-input-sm w-full ${errors.title ? "border-danger" : ""}`}
-              value={reportTitle}
-              onChange={(e) => {
-                setReportTitle(e.target.value);
-                if (errors.title) setErrors((prev) => ({ ...prev, title: null }));
-              }}
-              placeholder="e.g. FY24 Comprehensive IT Services Peer Benchmarking Dossier"
-            />
-            {errors.title && (
-              <span className="text-[11px] text-danger flex-row items-center gap-1 mt-1">
-                <AlertCircle size={11} /> {errors.title}
-              </span>
+
+            {loading ? (
+              <p>Loading documents...</p>
+            ) : documents.length === 0 ? (
+              <p className="text-muted">
+                No indexed documents available.
+                Upload and analyze a financial document first.
+              </p>
+            ) : (
+              <select
+                className="fin-select w-full"
+                value={primaryId}
+                disabled={submitting}
+                onChange={e => {
+                  setPrimaryId(e.target.value);
+                  setComparisonIds(prev =>
+                    prev.filter(id => id !== e.target.value)
+                  );
+                }}
+              >
+                {documents.map(doc => (
+                  <option key={doc.id} value={doc.id}>
+                    {doc.name}
+                  </option>
+                ))}
+              </select>
             )}
           </div>
 
-          {/* 3. Company Selection */}
           <div className="config-form-group mt-3">
-            <label className="config-label flex-row justify-between items-center">
-              <span>3. Company Selection (Target & Comparison):</span>
-              <span className="text-[11px] text-muted">
-                {selectedCompanyIds.length} entity selected
-              </span>
+            <label className="config-label">
+              Comparison Documents (Optional)
             </label>
-            <div className="companies-checkbox-grid mt-1.5">
-              {Object.keys(SEED_COMPANIES).map((key) => {
-                const comp = SEED_COMPANIES[key];
-                const isSelected = selectedCompanyIds.includes(key);
-                return (
-                  <label
-                    key={key}
-                    className={`company-choice-box ${isSelected ? "selected" : ""}`}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={isSelected}
-                      onChange={() => handleToggleCompany(key)}
-                      className="doc-checkbox"
-                    />
-                    <div className="flex-1 min-w-0">
-                      <div className="flex-row items-center justify-between">
-                        <strong className="text-xs text-main">{comp.name}</strong>
-                        <span className="fin-badge fin-badge-outline fin-badge-xs font-mono">
-                          {comp.ticker}
-                        </span>
-                      </div>
-                      <span className="text-[11px] text-muted block truncate mt-0.5">
-                        {comp.sector} • {comp.currency}
-                      </span>
-                    </div>
-                  </label>
-                );
-              })}
-            </div>
-            {errors.companies && (
-              <span className="text-[11px] text-danger flex-row items-center gap-1 mt-1">
-                <AlertCircle size={11} /> {errors.companies}
-              </span>
-            )}
+
+            {documents
+              .filter(doc => doc.id !== primaryId)
+              .map(doc => (
+                <label
+                  key={doc.id}
+                  className="config-doc-item"
+                >
+                  <input
+                    type="checkbox"
+                    checked={comparisonIds.includes(doc.id)}
+                    disabled={submitting}
+                    onChange={() => toggleComparison(doc.id)}
+                  />
+
+                  <span>{doc.name}</span>
+                </label>
+              ))}
           </div>
 
-          {/* 4. Source Document Selection */}
           <div className="config-form-group mt-3">
-            <div className="flex-row justify-between items-center mb-1">
-              <label className="config-label">
-                <span>4. Source Documents in Retrieval Scope:</span>
-              </label>
-              <div className="flex-row gap-2 text-[11px]">
-                <button
-                  type="button"
-                  className="text-teal hover:underline font-medium"
-                  onClick={() => setSelectedDocIds(availableDocs.map((d) => d.id))}
-                >
-                  Select All
-                </button>
-                <span className="text-muted">•</span>
-                <button
-                  type="button"
-                  className="text-muted hover:text-main font-medium"
-                  onClick={() => setSelectedDocIds([])}
-                >
-                  Clear
-                </button>
-              </div>
-            </div>
+            <label className="config-label">
+              Report Sections
+            </label>
 
-            <div className="config-docs-list">
-              {availableDocs.map((doc) => {
-                const isChecked = selectedDocIds.includes(doc.id);
-                return (
-                  <label
-                    key={doc.id}
-                    className={`config-doc-item ${isChecked ? "checked" : ""}`}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={isChecked}
-                      onChange={() => handleToggleDoc(doc.id)}
-                      className="doc-checkbox"
-                    />
-                    <div className="flex-1 min-w-0">
-                      <div className="flex-row justify-between items-center">
-                        <span className="text-xs font-medium text-main truncate" title={doc.name}>
-                          {doc.name}
-                        </span>
-                        <span className="text-[10px] font-mono text-teal">
-                          {doc.ticker || "PDF"}
-                        </span>
-                      </div>
-                      <span className="text-[11px] text-muted block mt-0.5">
-                        {doc.pages || 100} pages • {doc.chunksCount || 1200} chunks • {doc.status || "Ready"}
-                      </span>
-                    </div>
-                  </label>
-                );
-              })}
-            </div>
+            {[
+              "Executive Summary",
+              "Key Financials",
+              "Red Flags",
+              "Company Comparison",
+              "Outlook"
+            ].map(section => (
+              <div key={section} className="config-doc-item">
+                {section}
+              </div>
+            ))}
+
+            <p className="text-xs text-muted">
+              Sections without sufficient evidence will be
+              marked unavailable.
+            </p>
           </div>
 
-          {/* 5. Report Sections to Include (The 5 required sections) */}
-          <div className="config-form-group mt-3">
-            <div className="flex-row justify-between items-center mb-1.5">
-              <label className="config-label">
-                <span>5. Report Sections to Include:</span>
-                <span className="text-danger ml-1">*</span>
-              </label>
-              <div className="flex-row gap-2 text-[11px]">
-                <button
-                  type="button"
-                  className="text-teal hover:underline font-medium"
-                  onClick={handleSelectAllSections}
-                >
-                  Include All
-                </button>
-                <span className="text-muted">•</span>
-                <button
-                  type="button"
-                  className="text-muted hover:text-main font-medium"
-                  onClick={handleDeselectOptionalSections}
-                >
-                  Essential Only
-                </button>
-              </div>
-            </div>
-
-            <div className="sections-selection-flow">
-              {AVAILABLE_REPORT_SECTIONS.map((sec) => {
-                const isSelected = selectedSectionIds.includes(sec.id);
-                const isComparison = sec.id === "company_comparison";
-                const hasComparisonWarning = isComparison && selectedCompanyIds.length < 2 && isSelected;
-
-                return (
-                  <label
-                    key={sec.id}
-                    className={`section-choice-card ${isSelected ? "selected" : ""} ${
-                      hasComparisonWarning ? "warning" : ""
-                    }`}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={isSelected}
-                      onChange={() => handleToggleSection(sec.id)}
-                      className="doc-checkbox"
-                    />
-                    <div className="flex-1 min-w-0">
-                      <div className="flex-row items-center justify-between">
-                        <strong className="text-xs text-main">{sec.title}</strong>
-                        {sec.required ? (
-                          <span className="fin-badge fin-badge-xs fin-badge-outline">Required</span>
-                        ) : isComparison ? (
-                          <span className="fin-badge fin-badge-xs fin-badge-purple">2+ Entities</span>
-                        ) : null}
-                      </div>
-                      <p className="text-[11px] text-muted mt-0.5 leading-relaxed">
-                        {sec.description}
-                      </p>
-                      {hasComparisonWarning && (
-                        <div className="comparison-warning-inline mt-1 text-[11px] text-warning flex-row items-center gap-1">
-                          <AlertCircle size={11} />
-                          <span>Requires 2+ companies. Select a second company above to generate.</span>
-                        </div>
-                      )}
-                    </div>
-                  </label>
-                );
-              })}
-            </div>
-            {errors.sections && (
-              <span className="text-[11px] text-danger flex-row items-center gap-1 mt-1">
-                <AlertCircle size={11} /> {errors.sections}
-              </span>
-            )}
-            {errors.comparison && (
-              <span className="text-[11px] text-warning flex-row items-center gap-1 mt-1">
-                <AlertCircle size={11} /> {errors.comparison}
-              </span>
-            )}
-          </div>
+          {error && (
+            <p className="text-danger mt-3">
+              {error}
+            </p>
+          )}
         </div>
 
-        {/* Modal Footer Controls */}
         <div className="modal-footer-row">
           <button
-            type="button"
-            className="fin-btn fin-btn-secondary fin-btn-sm"
+            className="fin-btn fin-btn-secondary"
             onClick={onClose}
-            disabled={isSubmitting}
+            disabled={submitting}
           >
             Cancel
           </button>
 
           <button
-            type="button"
-            className="fin-btn fin-btn-secondary fin-btn-sm"
-            onClick={() => handleSubmit("Draft")}
-            disabled={isSubmitting}
-            title="Save configuration as a Draft report"
+            className="fin-btn fin-btn-primary"
+            disabled={loading || submitting || !primaryId}
+            onClick={handleSubmit}
           >
-            <Clock size={13} className="mr-1" />
-            <span>Save as Draft</span>
-          </button>
+            <Sparkles size={14} />
 
-          <button
-            type="button"
-            className="fin-btn fin-btn-primary fin-btn-sm"
-            onClick={() => handleSubmit("Generating")}
-            disabled={isSubmitting}
-            id="start-report-generation-btn"
-          >
-            {isSubmitting ? (
-              <>
-                <span className="fin-spinner-sm mr-1.5" />
-                <span>Initializing Pipeline...</span>
-              </>
-            ) : (
-              <>
-                <Sparkles size={13} className="mr-1.5" />
-                <span>Generate Report</span>
-              </>
-            )}
+            {submitting
+              ? "Generating Report..."
+              : "Generate Report"}
           </button>
         </div>
       </div>

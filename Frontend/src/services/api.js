@@ -188,7 +188,10 @@ export function adaptDocument(doc) {
     fileSizeBytes: bytes,
     uploadDate,
     uploadedTimestamp,
-    status: doc.indexed || doc.status === "Ready" ? "Ready" : (doc.status || "Uploaded"),
+    status: resolveDocumentStatus(doc),
+    processingStatus: doc.processing_status || null,
+    processingStage: doc.processing_stage || null,
+    processingJobId: doc.processing_job_id || null,    
     isSeed: Boolean(meta.is_seed || doc.isSeed),
     pages: doc.total_pages || doc.pages || 0,
     chunksCount: doc.chunk_count || doc.chunksCount || 0,
@@ -196,10 +199,37 @@ export function adaptDocument(doc) {
     ocrEngine,
     checksum,
     workspaceId,
+    indexed: Boolean(doc.indexed),
     metadata: meta
   };
 }
 
+
+export function resolveDocumentStatus(doc) {
+  const status = doc.processing_status;
+
+  switch (status) {
+    case "COMPLETED":
+      return doc.indexed ? "Ready" : "Error";
+
+    case "FAILED":
+      return "Error";
+
+    case "CANCELLED":
+      return "Cancelled";
+
+    case "QUEUED":
+    case "PENDING":
+      return "Queued";
+
+    case "PROCESSING":
+    case "RUNNING":
+      return "Processing";
+
+    default:
+      return doc.indexed ? "Indexed" : "Uploaded";
+  }
+}
 export function adaptSearchResult(item) {
   if (!item) return null;
   const meta = item.metadata || {};
@@ -381,7 +411,10 @@ export const api = {
   },
 
   async seedDocuments() {
-    return await request("/documents/seed", { method: "POST", timeout: 180000 });
+    return await request("/documents/seed", {
+      method: "POST",
+      timeout: 600000
+    });
   },
 
   async getDocumentFile(documentId, signal) {
@@ -479,14 +512,73 @@ export const api = {
     });
   },
 
-  async generateReport(documentId) {
+  async generateReport(documentId, comparisonDocumentIds = []) {
     return await request("/reports/generate", {
       method: "POST",
-      body: JSON.stringify({ document_id: documentId }),
-      timeout: 120000
+      body: JSON.stringify({
+        document_id: documentId,
+        comparison_document_ids: comparisonDocumentIds
+      }),
+      timeout: 180000
     });
   },
 
+  async exportReportPdf(documentId, comparisonDocumentIds = []) {
+    return await request("/reports/export/pdf", {
+      method: "POST",
+      body: JSON.stringify({
+        document_id: documentId,
+        comparison_document_ids: comparisonDocumentIds
+      }),
+      responseType: "blob",
+      headers: {
+        Accept: "application/pdf"
+      },
+      timeout: 180000
+    });
+  },
+
+  async listReports() {
+    return await request("/reports");
+  },
+
+  async getReport(reportId) {
+    return await request(
+      `/reports/${encodeURIComponent(reportId)}`
+    );
+  },
+
+  async renameReport(reportId, title) {
+    return await request(
+      `/reports/${encodeURIComponent(reportId)}`,
+      {
+        method: "PATCH",
+        body: JSON.stringify({ title })
+      }
+    );
+  },
+
+  async deleteReport(reportId) {
+    return await request(
+      `/reports/${encodeURIComponent(reportId)}`,
+      {
+        method: "DELETE"
+      }
+    );
+  },
+
+  async downloadSavedReport(reportId) {
+    return await request(
+      `/reports/${encodeURIComponent(reportId)}/pdf`,
+      {
+        responseType: "blob",
+        headers: {
+          Accept: "application/pdf"
+        },
+        timeout: 180000
+      }
+    );
+  },
   async getWorkflowRunStatus(runId) {
     return await request(`/workflows/${encodeURIComponent(runId)}/status`, { method: "GET" });
   },

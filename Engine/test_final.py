@@ -29,7 +29,13 @@ test_files = [
     "test_session_features.py",
     "test_final_config.py",
     "test_final_bugs.py",
-    "test_frontend_isolation.py"
+    "test_frontend_isolation.py",
+    "test_report_agent.py",
+"test_pdf_export.py",
+"test_report_frontend.py",
+"test_automatic_processing.py",
+"test_seed_documents.py",
+"test_live_integration.py",
 ]
 def run_check(name, command, cwd):
 
